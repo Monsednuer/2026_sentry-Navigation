@@ -1,0 +1,86 @@
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.20
+      movement_time_allowance: 8.0
+
+    general_goal_checker:
+      stateful: true
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.20
+      yaw_goal_tolerance: 0.25
+
+    FollowPath:
+      plugin: "nav2_mppi_controller::MPPIController"
+      motion_model: "DiffDrive"
+      time_steps: 56
+      model_dt: 0.05
+      batch_size: 1200
+      iteration_count: 1
+      prune_distance: 1.7
+      transform_tolerance: 0.1
+      temperature: 0.3
+      gamma: 0.015
+      vx_max: 1.2
+      vx_min: -0.35
+      vy_max: 0.0
+      wz_max: 1.9
+      vx_std: 0.2
+      vy_std: 0.0
+      wz_std: 0.4
+      visualize: false
+      reset_period: 1.0
+      critics:
+        ["ConstraintCritic", "CostCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic"]
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+      update_frequency: 15.0
+      publish_frequency: 10.0
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 6
+      height: 6
+      resolution: 0.05
+      robot_radius: 0.25
+      always_send_full_costmap: true
+      plugins: ["stvl_layer", "inflation_layer"]
+
+      stvl_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        voxel_decay: 2.0
+        decay_model: 0
+        voxel_size: 0.05
+        track_unknown_space: true
+        marking_threshold: 0
+        observation_sources: cloud
+        cloud:
+          topic: /dlio/odom_node/pointcloud/deskewed
+          data_type: PointCloud2
+          model_type: 1
+          obstacle_range: 6.0
+          raytrace_range: 8.0
+          max_obstacle_height: 2.0
+          min_obstacle_height: -0.2
+          clearing: true
+          marking: true
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 8.0
+        inflation_radius: 0.40

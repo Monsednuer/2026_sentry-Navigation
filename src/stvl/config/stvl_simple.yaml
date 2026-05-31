@@ -1,0 +1,33 @@
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 40.0
+      height: 40.0
+      origin_x: -20.0
+      origin_y: -20.0
+      resolution: 0.2
+      plugins: ["stvl_layer", "inflation_layer"]
+      
+      stvl_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        voxel_decay: 5.0
+        decay_model: 0
+        voxel_size: 0.2
+        observation_sources: cloud
+        cloud:
+          data_type: PointCloud2
+          topic: /cloud_registered
+          marking: true
+          clearing: true
+          model_type: 1
+          max_obstacle_height: 2.0
+          min_obstacle_height: 0.05
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        enabled: true
+        inflation_radius: 0.5

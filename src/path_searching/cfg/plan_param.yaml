@@ -1,0 +1,88 @@
+/**:
+  ros__parameters:
+    # ===================== [A] 基础地图/地形 =====================
+    # 是否启用楼梯高度约束（平面导航一般 false）
+    enable_downstairs: false
+
+    # ===================== [B] A* 搜索代价 =====================
+    # A* 对障碍距离的代价权重（越大越倾向远离障碍）
+    obstacle_cost_weight: 10.0
+    # A* 对动态障碍的额外惩罚权重
+    dynamic_penalty_weight: 0.0
+
+    # ===================== [C] 动态障碍来源与建图 =====================
+    # 是否使用点云动态障碍源（/cloud_livox_obs）
+    use_pointcloud_dynamic_obstacles: false
+    # 是否使用 costmap 动态障碍源
+    use_costmap_dynamic_obstacles: true
+    # 融合通行判据时是否使用 costmap clearance（与 ESDF 取最小）
+    use_costmap_clearance_fusion: true
+
+    # 点云障碍“障碍侧膨胀半径”（m）：
+    # 把单个点云障碍点向周围扩成圆形占据区，补偿点稀疏/噪声/时延。
+    obstacle_expand_radius: 0.15
+    # 旧参数兼容名：若 > 0，会覆盖 obstacle_expand_radius。
+    voronoi_radius: 0.25
+
+    # costmap 栅格占据阈值（0~100），>= 该值判为障碍
+    costmap_occupied_threshold: 50
+    # costmap 全量地图话题
+    costmap_topic: /costmap/costmap
+    # costmap 增量更新话题
+    costmap_update_topic: /costmap/costmap_updates
+
+    # ===================== [D] 通行判据（前视采样） =====================
+    # 机器人内接半径（m）
+    robot_inscribed_radius: 0.25
+    # 通行判据“判据侧余量”（m）：
+    # required_clearance = robot_inscribed_radius + clearance_margin。
+    # 这不是改地图本身，而是提高“可通行阈值”，效果等价于更保守的判据膨胀。
+    clearance_margin: 0.05
+    # 前视采样检查距离（m）
+    forward_check_distance: 2.0
+    # 前视采样步长（m）
+    forward_sample_step: 0.10
+    # 起点占据时的“脱困模式”：
+    # 仅在起点落在占据栅格时触发，前 N 步可放宽碰撞/净空约束以脱困。
+    # 一旦脱离占据/净空不足区域，立即恢复正常避障判据。
+    enable_start_escape_mode: true
+    start_escape_steps: 20
+    # 终点占据/净空不足时的“终点逃生”：
+    # 在目标点周围半径内搜索替代终点，避免因定位误差或局部噪声导致 NO_PATH。
+    enable_goal_escape_mode: true
+    # 替代终点搜索半径（m）
+    goal_escape_search_radius: 1.0
+    # 终点净空容忍（m）：
+    # relaxed_clearance = required_clearance - goal_escape_clearance_tolerance
+    goal_escape_clearance_tolerance: 0.08
+
+    # ===================== [E] 碰撞/阻塞处理 =====================
+    # 直接碰撞检查半径（m）。
+    # 实际使用阈值为 max(check_collision_radius, required_clearance)。
+    check_collision_radius: 0.10
+    # 检测到阻塞后是否先截断当前路径，再触发重规划
+    enable_blocked_path_truncation: false
+    # 路径截断点相对阻塞区的额外安全余量（m）
+    blocked_path_truncation_margin: 0.20
+    # 是否启用“截断点局部 block 区”：把触发截断的附近区域临时加入动态禁行
+    enable_blocked_zone_memory: true
+    # block 区半径（m，可调）：
+    # 半径越大，越不容易重复搜回同一条贴障路径；但也更保守。
+    blocked_zone_memory_radius: 0.25
+    # block 区保留时间（s，可调）：
+    # 超过该时间会自动清理，这样后续允许重新搜索经过该区域的路径。
+    blocked_zone_memory_ttl_sec: 2.0
+
+    # ===================== [F] 重规划触发节流/停滞判据 =====================
+    # 运行时检查周期（s）：越小越实时，但 CPU 占用更高
+    monitor_period_sec: 0.20
+    # 两次重规划的最小间隔（s）
+    min_replan_interval_sec: 0.5
+    # 是否启用“停滞触发重规划”
+    enable_stall_trigger: true
+    # 停滞时间窗（s）
+    stall_window_sec: 8.0
+    # 时间窗内位移小于该值（m）判定为“几乎没动”
+    stall_move_threshold: 0.05
+    # 距离目标小于该值（m）时，不触发停滞重规划
+    stall_goal_distance_threshold: 0.30

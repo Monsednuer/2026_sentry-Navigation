@@ -1,0 +1,7 @@
+<launch>
+    <node name="region_detector" pkg="region_detector" type="region_detector_node" output="screen" respawn ="true">
+        <rosparam file="$(find region_detector)/cfg/region.yaml" command="load"/>
+    </node>
+    <include file="$(find speed_manager)/launch/speed_manager.launch" />
+    <node name="navi_gimbal_controller" pkg = "navi_gimbal_controller" type = "navi_gimbal_controller_node" output="screen" />
+</launch>

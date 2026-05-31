@@ -1,0 +1,7 @@
+regions:
+  - name: "default"
+    speeds: [1.5, 2.0, 2.5]
+  - name: "up"
+    speeds: [2.0, 2.5, 2.5]
+  - name: "down"
+    speeds: [1.2, 1.5, 1.5]

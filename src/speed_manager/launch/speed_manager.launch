@@ -1,0 +1,6 @@
+<launch>
+    <node name="speed_manager" pkg="speed_manager" type="speed_manager_node" output="screen">
+        <rosparam file="$(find speed_manager)/cfg/speed.yaml" command="load"/>
+
+    </node>
+</launch>

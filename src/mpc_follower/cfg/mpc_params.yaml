@@ -1,0 +1,41 @@
+﻿mpc_follower:
+  ros__parameters:
+    # Time parameters
+    Ts: 0.05
+    N: 30
+
+    # Robot physical constraints
+    MinR: 0.0
+    MaxLinear: 2.0
+    MinLinear: -2.0
+    MaxAngular: 2.0
+    MinAngular: -2.0
+
+    # Acceleration constraints
+    MaxAccelLinear: 1.5
+    MinAccelLinear: -1.5
+    MaxAccelAngular: 6.0
+    MinAccelAngular: -6.0
+
+    # MPC weights
+    Wx: 20.0
+    Wy: 20.0
+    Wtheta: 10.0
+    Wv: 0.02
+    Womega: 0.1
+    WRadius: 1.0
+    Rv: 0.1
+    Romega: 0.1
+    target_speed: 1.8
+    reach_slow_distance: 1.0
+    reach_stop_distance: 0.3
+
+    # Optimizer parameters
+    OptTolerance: 0.001
+    GlobalMaxEval: 500
+    LocalMaxEval: 1000
+    GlobalInitNoise: 0.2
+
+    # Obstacle parameters
+    ObstacleInflation: 0.5
+    Wobs: 100.0

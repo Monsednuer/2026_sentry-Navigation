@@ -1,0 +1,8 @@
+path_follower:
+  ros__parameters:
+    target_speed: 1.8
+    kp: 0.0
+    ki: 0.1
+    kd: 0.0
+    k_lookahead: 0.65
+    min_lookahead: 0.2

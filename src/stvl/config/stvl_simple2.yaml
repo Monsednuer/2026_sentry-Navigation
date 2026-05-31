@@ -1,0 +1,38 @@
+# ~/stvl_test_ws/config/stvl_simple.yaml
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      global_frame: map          # 或 map，根据你的定位
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 50
+      height: 50
+      origin_x: -25.0
+      origin_y: -25.0
+      resolution: 0.1
+      plugins: ["stvl_layer", "inflation_layer"]
+      
+      stvl_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        voxel_decay: 5.0           # 5秒衰减，动态环境
+        decay_model: 0             # 0=线性, 1=指数
+        voxel_size: 0.05
+        track_unknown_space: true
+        
+        observation_sources: lidar
+        lidar:
+          data_type: PointCloud2
+          topic: /cloud_registered      # 改成你的点云话题
+          marking: true
+          clearing: true
+          model_type: 1            # 1=3D LiDAR
+          max_obstacle_height: 2.0
+          min_obstacle_height: 0.05
+          obstacle_range: 15.0
+          raytrace_range: 20.0
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        enabled: true
+        inflation_radius: 0.3
