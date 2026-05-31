@@ -1,15 +1,15 @@
 # 2026_sentry-Navigation
 
-ROS 2 sentry navigation workspace for map-based planning, path following, speed-region handling, and chassis velocity forwarding.
+这是一个面向哨兵机器人导航的 ROS 2 工作空间，当前主要包含全局路径规划、路径跟踪、区域限速、目标管理和底盘速度转发等模块。
 
-This repository is arranged as a ROS 2 workspace source tree. Clone it as the workspace root, build with `colcon`, then source the generated setup file before launching nodes.
+本仓库本身就是一个 ROS 2 workspace 的根目录。迁移到 Linux 后，可以直接作为 `navigation_ws` 使用，通过 `colcon` 构建并运行各个 launch 文件。
 
-## Project Overview
+## 项目总览
 
-The current navigation pipeline is:
+当前导航主链路如下：
 
 ```text
-/ly/navi/goal or /ly/navi/goal_pose
+/ly/navi/goal 或 /ly/navi/goal_pose
         |
         v
 navigoal_manager
@@ -24,7 +24,7 @@ path_searching / plan_manager
         +--> /ly/navi/reachable
         |
         v
-path follower, MPC follower, or Nav2 MPPI controller
+路径跟踪器、MPC 跟踪器或 Nav2 MPPI 控制器
         |
         +--> /cmd_vel
         +--> /ly/navi/reached
@@ -36,7 +36,7 @@ vel_forwarder
 /ly/control/vel
 ```
 
-Optional speed-region logic runs alongside the planner:
+区域识别和限速模块会并行处理规划路径：
 
 ```text
 /sPath + /ly/navi/speed_level
@@ -54,27 +54,27 @@ speed_manager
 /setFollowSpeed
 ```
 
-Only one controller should publish `/cmd_vel` at a time. Use either `mpc_follower`, `path_following/path_follower`, or the Nav2 MPPI launch, not several simultaneously.
+注意：同一时间只能启动一种会发布 `/cmd_vel` 的控制器。`mpc_follower`、`path_following/path_follower` 和 Nav2 MPPI 控制器不要同时运行，否则速度指令会互相覆盖。
 
-## Packages
+## 功能包说明
 
-| Package | Purpose |
+| 功能包 | 作用 |
 | --- | --- |
-| `path_searching` | A* / Voronoi / ESDF based global planning. Publishes `/sPath` and `/ly/navi/reachable`. Includes map-server launch helpers and an ESDF benchmark executable. |
-| `path_following` | Lightweight path follower and Nav2 MPPI bridge. Subscribes `/sPath` and `/setFollowSpeed`, publishes `/cmd_vel` and `/ly/navi/reached`. |
-| `mpc_follower` | MPC-based path follower using NLOPT. Subscribes `/odom`, `/sPath`, `/setFollowSpeed`, optional `/dynamic_obstacles`; publishes `/cmd_vel` and `/ly/navi/reached`. |
-| `navigoal_manager` | Converts navigation goal IDs or encoded goal poses into `/goal_pose`. |
-| `region_detector` | Detects directional regions along the planned path and publishes region/rotation hints. |
-| `speed_manager` | Maps directional region plus speed level to `/setFollowSpeed`. |
-| `vel_forwarder` | Converts `/cmd_vel` into the chassis velocity message and remaps `/ly/navi/vel` to `/ly/control/vel` in its launch file. |
+| `path_searching` | 全局路径规划模块，包含 A*、Voronoi、ESDF 相关逻辑；发布 `/sPath` 和 `/ly/navi/reachable`；包含地图服务 launch 和 ESDF benchmark。 |
+| `path_following` | 简单路径跟踪器和 Nav2 MPPI 桥接模块；订阅 `/sPath`、`/setFollowSpeed`，发布 `/cmd_vel` 和 `/ly/navi/reached`。 |
+| `mpc_follower` | 基于 NLOPT 的 MPC 路径跟踪器；订阅 `/odom`、`/sPath`、`/setFollowSpeed`，可选订阅 `/dynamic_obstacles`；发布 `/cmd_vel` 和 `/ly/navi/reached`。 |
+| `navigoal_manager` | 将目标编号或编码后的目标位姿转换为 `/goal_pose`。 |
+| `region_detector` | 根据规划路径识别方向区域，并发布区域名和是否需要旋转的提示。 |
+| `speed_manager` | 根据方向区域和速度档位计算 `/setFollowSpeed`。 |
+| `vel_forwarder` | 将 `/cmd_vel` 转换为底盘速度消息，并在 launch 中把 `/ly/navi/vel` remap 到 `/ly/control/vel`。 |
 
-## Repository Layout
+## 目录结构
 
 ```text
 .
-├── docs/                         # Notes and debugging documents
-├── rviz/                         # RViz config
-├── script/                       # Map conversion and point-cloud helper scripts
+├── docs/                         # 调试说明和项目文档
+├── rviz/                         # RViz 配置
+├── script/                       # 地图转换、点云发布等辅助脚本
 └── src/
     ├── mpc_follower/
     ├── navigoal_manager/
@@ -86,33 +86,33 @@ Only one controller should publish `/cmd_vel` at a time. Use either `mpc_followe
     └── vel_forwarder/
 ```
 
-The repository contains map and point-cloud assets used by the current setup. Some `.pcd` files are larger than 50 MB, so GitHub may warn about them during push. Consider Git LFS if these assets continue to grow.
+仓库中包含当前使用的地图和点云数据。部分 `.pcd` 文件超过 50 MB，GitHub 会给出大文件提醒；如果后续地图继续变大，建议改用 Git LFS 管理。
 
-## Environment
+## 推荐环境
 
-Recommended target:
+建议在以下环境中使用：
 
 - Ubuntu 22.04
 - ROS 2 Humble
 - `colcon`
 - `rosdep`
-- Nav2 packages
-- PCL, Eigen, TF2, visualization messages
-- NLOPT for `mpc_follower`
+- Nav2 相关包
+- PCL、Eigen、TF2、visualization messages
+- `mpc_follower` 需要 NLOPT
 
-Extra dependencies used by current packages:
+当前项目额外依赖：
 
 - `libnlopt-dev`
-- `libpcl-dev` / ROS PCL packages
+- `libpcl-dev` / ROS PCL 相关包
 - `nav2_map_server`
 - `nav2_controller`
 - `nav2_mppi_controller`
 - `nav2_lifecycle_manager`
 - `nav2_costmap_2d`
-- `spatio_temporal_voxel_layer` if using the MPPI/STVL costmap configuration
-- `gimbal_driver` if building `vel_forwarder` against the current chassis message type
+- 使用 MPPI/STVL costmap 配置时需要 `spatio_temporal_voxel_layer`
+- 构建 `vel_forwarder` 时需要当前底盘消息包 `gimbal_driver`
 
-Install common dependencies:
+安装常用依赖：
 
 ```bash
 sudo apt update
@@ -123,14 +123,14 @@ sudo apt install -y \
   libpcl-dev
 ```
 
-Then let `rosdep` install ROS package dependencies:
+然后使用 `rosdep` 安装 ROS 依赖：
 
 ```bash
 cd ~/navigation_ws
 rosdep install --from-paths src -i -y
 ```
 
-## Clone And Build
+## 克隆与构建
 
 ```bash
 cd ~
@@ -141,7 +141,7 @@ colcon build --symlink-install
 source install/setup.bash
 ```
 
-For a focused rebuild:
+只重编某个功能包时：
 
 ```bash
 colcon build --packages-select path_searching --symlink-install
@@ -149,24 +149,24 @@ colcon build --packages-select mpc_follower --symlink-install
 source install/setup.bash
 ```
 
-Source the workspace in every new terminal:
+每次打开新终端后都需要 source 工作空间：
 
 ```bash
 cd ~/navigation_ws
 source install/setup.bash
 ```
 
-## Main Launch Flow
+## 主流程启动顺序
 
-### 1. Start Planner And Map Server
+### 1. 启动规划器和地图服务
 
-`navion.launch.py` starts `plan_manager`, `nav2_map_server`, lifecycle management, and static TF publishers used by the current setup.
+`navion.launch.py` 会启动 `plan_manager`、`nav2_map_server`、生命周期管理节点，以及当前配置中使用的静态 TF。
 
 ```bash
 ros2 launch path_searching navion.launch.py
 ```
 
-Useful checks:
+常用检查命令：
 
 ```bash
 ros2 lifecycle get /map_server
@@ -174,66 +174,66 @@ ros2 topic echo /map --once
 ros2 node info /plan_manager
 ```
 
-Open RViz manually when needed:
+需要查看 RViz 时手动启动：
 
 ```bash
 rviz2 -d ~/navigation_ws/rviz/path_searching.rviz
 ```
 
-### 2. Start Goal Manager
+### 2. 启动目标管理器
 
 ```bash
 ros2 launch navigoal_manager navigoal_pub.launch.py
 ```
 
-Publish a goal ID:
+发布一个目标编号：
 
 ```bash
 ros2 topic pub --once /ly/navi/goal std_msgs/msg/UInt8 "{data: 0}"
 ```
 
-Check the converted goal:
+检查是否转换成 `/goal_pose`：
 
 ```bash
 ros2 topic echo /goal_pose --once
 ```
 
-### 3. Start Region And Speed Management
+### 3. 启动区域识别和速度管理
 
-`region_detector.launch.py` also includes `speed_manager.launch.py`.
+`region_detector.launch.py` 会同时 include `speed_manager.launch.py`。
 
 ```bash
 ros2 launch region_detector region_detector.launch.py
 ```
 
-Set a speed level. Valid levels are `0`, `1`, and `2`.
+设置速度档位。合法档位为 `0`、`1`、`2`：
 
 ```bash
 ros2 topic pub --once /ly/navi/speed_level std_msgs/msg/UInt8 "{data: 1}"
 ros2 topic echo /setFollowSpeed
 ```
 
-### 4. Start One Path Follower
+### 4. 启动一种路径跟踪器
 
-MPC follower:
+MPC 跟踪器：
 
 ```bash
 ros2 launch mpc_follower mpc_follower.launch.py
 ```
 
-Simple path follower:
+简单路径跟踪器：
 
 ```bash
 ros2 launch path_following path_following.launch.py
 ```
 
-Nav2 MPPI controller bridge:
+Nav2 MPPI 控制器桥接：
 
 ```bash
 ros2 launch path_following mppi_controller.launch.py
 ```
 
-Check velocity output:
+检查速度输出：
 
 ```bash
 ros2 topic hz /cmd_vel
@@ -241,83 +241,83 @@ ros2 topic echo /cmd_vel
 ros2 topic echo /ly/navi/reached
 ```
 
-### 5. Forward Velocity To Chassis
+### 5. 将速度转发到底盘
 
-Start this only after `/cmd_vel` looks reasonable.
+确认 `/cmd_vel` 输出合理后，再启动底盘速度转发：
 
 ```bash
 ros2 launch vel_forwarder vel_forwarder.launch.py
 ```
 
-Check the remapped chassis velocity output:
+检查 remap 后的底盘速度输出：
 
 ```bash
 ros2 topic echo /ly/control/vel
 ```
 
-## Important Topics
+## 关键话题
 
-| Topic | Type | Direction |
+| 话题 | 类型 | 说明 |
 | --- | --- | --- |
-| `/ly/navi/goal` | `std_msgs/msg/UInt8` | Goal ID input to `navigoal_manager` |
-| `/ly/navi/goal_pose` | `std_msgs/msg/UInt16MultiArray` | Encoded goal-pose input to `navigoal_manager` |
-| `/goal_pose` | `geometry_msgs/msg/PoseStamped` | Planner goal |
-| `/map` | `nav_msgs/msg/OccupancyGrid` | Static map input to planner |
-| `/costmap/costmap` | `nav_msgs/msg/OccupancyGrid` | Optional dynamic costmap input |
-| `/costmap/costmap_updates` | `map_msgs/msg/OccupancyGridUpdate` | Optional dynamic costmap update input |
-| `/dynamic_obstacles` | `sensor_msgs/msg/PointCloud2` | Optional dynamic obstacle input |
-| `/sPath` | `nav_msgs/msg/Path` | Planned path |
-| `/ly/navi/reachable` | `std_msgs/msg/Bool` | Planner reachability result |
-| `/ly/navi/speed_level` | `std_msgs/msg/UInt8` | Speed gear input, valid values 0/1/2 |
-| `/ly/navi/directional_region` | `std_msgs/msg/String` | Region detector output |
-| `/ly/navi/should_rotate` | `std_msgs/msg/Bool` | Region detector rotation hint |
-| `/setFollowSpeed` | `std_msgs/msg/Float64` | Target speed for followers |
-| `/odom` | `nav_msgs/msg/Odometry` | Odometry input for MPC |
-| `/cmd_vel` | `geometry_msgs/msg/Twist` | Controller velocity output |
-| `/ly/navi/reached` | `std_msgs/msg/Bool` | Goal reached flag |
-| `/ly/control/vel` | chassis velocity message | Final remapped chassis velocity output |
+| `/ly/navi/goal` | `std_msgs/msg/UInt8` | 目标编号，输入给 `navigoal_manager`。 |
+| `/ly/navi/goal_pose` | `std_msgs/msg/UInt16MultiArray` | 编码目标位姿，输入给 `navigoal_manager`。 |
+| `/goal_pose` | `geometry_msgs/msg/PoseStamped` | 规划器目标点。 |
+| `/map` | `nav_msgs/msg/OccupancyGrid` | 静态地图，输入给规划器。 |
+| `/costmap/costmap` | `nav_msgs/msg/OccupancyGrid` | 可选动态 costmap 输入。 |
+| `/costmap/costmap_updates` | `map_msgs/msg/OccupancyGridUpdate` | 可选动态 costmap 增量更新。 |
+| `/dynamic_obstacles` | `sensor_msgs/msg/PointCloud2` | 可选动态障碍物点云。 |
+| `/sPath` | `nav_msgs/msg/Path` | 规划得到的路径。 |
+| `/ly/navi/reachable` | `std_msgs/msg/Bool` | 规划是否可达。 |
+| `/ly/navi/speed_level` | `std_msgs/msg/UInt8` | 速度档位输入，合法值为 0/1/2。 |
+| `/ly/navi/directional_region` | `std_msgs/msg/String` | 当前路径所属方向区域。 |
+| `/ly/navi/should_rotate` | `std_msgs/msg/Bool` | 是否建议旋转。 |
+| `/setFollowSpeed` | `std_msgs/msg/Float64` | 跟踪器使用的目标速度。 |
+| `/odom` | `nav_msgs/msg/Odometry` | MPC 使用的里程计输入。 |
+| `/cmd_vel` | `geometry_msgs/msg/Twist` | 控制器输出速度。 |
+| `/ly/navi/reached` | `std_msgs/msg/Bool` | 是否到达目标点。 |
+| `/ly/control/vel` | 底盘速度消息 | 最终发送到底盘控制侧的速度话题。 |
 
-## Configuration Files
+## 主要配置文件
 
-| File | Notes |
+| 文件 | 说明 |
 | --- | --- |
-| `src/path_searching/cfg/plan_param.yaml` | Planner, ESDF/Voronoi, dynamic obstacle, costmap, and replanning parameters. |
-| `src/mpc_follower/cfg/mpc_params.yaml` | MPC horizon, weights, velocity/acceleration limits, obstacle cost, and stop/slowdown distances. |
-| `src/path_following/cfg/follow_param.yaml` | Simple follower PID/lookahead/speed parameters. |
-| `src/path_following/cfg/mppi_controller.yaml` | Nav2 MPPI controller and STVL local costmap parameters. |
-| `src/navigoal_manager/cfg/navigoal_param.yaml` | Red/blue goal coordinate tables. |
-| `src/region_detector/cfg/region.yaml` | Directional region polygons and direction pairs. |
-| `src/speed_manager/cfg/speed.yaml` | Region-specific speed table for speed levels 0/1/2. |
+| `src/path_searching/cfg/plan_param.yaml` | 规划器、ESDF/Voronoi、动态障碍物、costmap 和重规划参数。 |
+| `src/mpc_follower/cfg/mpc_params.yaml` | MPC 预测步长、权重、速度/加速度约束、障碍物代价和到点减速参数。 |
+| `src/path_following/cfg/follow_param.yaml` | 简单路径跟踪器的 PID、前视距离和目标速度参数。 |
+| `src/path_following/cfg/mppi_controller.yaml` | Nav2 MPPI 控制器和 STVL local costmap 参数。 |
+| `src/navigoal_manager/cfg/navigoal_param.yaml` | 红蓝方目标点坐标表。 |
+| `src/region_detector/cfg/region.yaml` | 方向区域多边形和方向向量配置。 |
+| `src/speed_manager/cfg/speed.yaml` | 不同区域在 0/1/2 档下的速度表。 |
 
-## Debugging
+## 调试命令
 
-Planner only:
+只启动规划器：
 
 ```bash
 ros2 launch path_searching astar.launch.py
 ```
 
-Planner with map server:
+启动带地图服务的规划流程：
 
 ```bash
 ros2 launch path_searching navion.launch.py
 ```
 
-Publish a manual goal:
+手动发布一个目标点：
 
 ```bash
 ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
 "{header: {frame_id: map}, pose: {position: {x: 1.0, y: 1.0, z: 0.0}, orientation: {w: 1.0}}}"
 ```
 
-Check planner output:
+检查规划结果：
 
 ```bash
 ros2 topic echo /sPath --once
 ros2 topic echo /ly/navi/reachable --once
 ```
 
-MPC input checks:
+检查 MPC 输入：
 
 ```bash
 ros2 topic hz /odom
@@ -325,27 +325,27 @@ ros2 topic echo /sPath --once
 ros2 topic echo /setFollowSpeed --once
 ```
 
-If MPC prints `No new odom data!`, verify that `/odom` is being published with updated timestamps.
+如果 MPC 输出日志中出现 `No new odom data!`，优先检查 `/odom` 是否在持续发布，并确认时间戳是否更新。
 
-Run the ESDF benchmark after building `path_searching`:
+构建 `path_searching` 后可以运行 ESDF benchmark：
 
 ```bash
 ./install/path_searching/lib/path_searching/esdf_benchmark 200 250 0.05 10 5
 ```
 
-## Notes For Linux Migration
+## Linux 迁移注意事项
 
-- This repository includes `.gitattributes` to normalize source/config/script line endings to LF.
-- Build artifacts such as `build/`, `install/`, and `log/` are ignored and should be regenerated on Linux.
-- VS Code databases, Python cache files, and local Codex metadata are ignored.
-- If shell scripts are not executable after cloning, run:
+- 仓库已包含 `.gitattributes`，源码、配置和脚本会尽量保持 LF 换行。
+- `build/`、`install/`、`log/` 不上传到 GitHub，迁移到 Linux 后重新构建即可。
+- VS Code 数据库、Python 缓存和本地 Codex 元数据已被 `.gitignore` 排除。
+- 如果 shell 脚本克隆后没有执行权限，可以运行：
 
 ```bash
 chmod +x src/shell/*.sh src/stvl/*.sh
 ```
 
-## Known Caveats
+## 已知注意点
 
-- Several source comments and older docs appear to have been saved with a mismatched text encoding. The current README is UTF-8, but older markdown/config comments may still display incorrectly until those files are cleaned.
-- `vel_forwarder` currently depends on `gimbal_driver` for the chassis `Vel` message even though local message definitions remain in `src/vel_forwarder/msg/`.
-- The MPPI/STVL path needs the relevant Nav2 and STVL plugins installed in the target ROS 2 environment.
+- 旧文档和部分源码注释可能存在编码不一致的问题，当前 README 已按 UTF-8 重新整理。
+- `vel_forwarder` 当前使用的是 `gimbal_driver` 中的底盘 `Vel` 消息；虽然 `src/vel_forwarder/msg/` 中仍保留本地消息定义，但 CMake 中对应生成逻辑已注释。
+- 使用 MPPI/STVL 路线时，需要目标系统中已安装 Nav2 和 STVL 相关插件。
