@@ -44,7 +44,7 @@ include_directories(
 # find_path(NLOPT_INCLUDE_DIR nlopt.hpp PATHS /usr/include /usr/local/include)
 # find_library(NLOPT_LIBRARY nlopt PATHS /usr/lib /usr/local/lib)
 find_path(NLOPT_INCLUDE_DIR NAMES nlopt.hpp)
-find_library(NLOPT_LIBRARY NAMES nlopt) 
+find_library(NLOPT_LIBRARY NAMES nlopt)
 
 if(NOT NLOPT_INCLUDE_DIR OR NOT NLOPT_LIBRARY)
   message(FATAL_ERROR "nlopt not found")

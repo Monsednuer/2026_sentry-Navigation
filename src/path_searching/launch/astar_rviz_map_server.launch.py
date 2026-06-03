@@ -106,7 +106,6 @@ def generate_launch_description():
         declare_param_file_cmd,
         # 先启动plan_manager
         plan_manager,
-        static_tf_pub,
         # 然后启动RViz
         delayed_rviz,
         # 最后启动地图服务器
