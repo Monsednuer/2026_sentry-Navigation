@@ -24,6 +24,8 @@
     Wv: 0.02
     Womega: 0.1
     WRadius: 1.0
+    # Reserved stop penalty weight; currently not used in the MPC objective.
+    kStopPenalty: 0.0
     Rv: 0.1
     Romega: 0.1
     target_speed: 1.8
