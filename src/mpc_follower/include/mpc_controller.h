@@ -3,6 +3,7 @@
 #include "robot_model.h"
 
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <random>
 #include <string>
@@ -11,16 +12,10 @@
 #include <nlopt.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <map_msgs/msg/occupancy_grid_update.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/path.hpp>
-#include <pcl/filters/crop_box.h>
-#include <pcl/filters/extract_indices.h>
-#include <pcl/filters/passthrough.h>
-#include <pcl/kdtree/kdtree.h>
-#include <pcl/point_types.h>
-#include <pcl/segmentation/extract_clusters.h>
-#include <pcl_conversions/pcl_conversions.h>
 #include <rclcpp/rclcpp.hpp>
-#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <tf2/LinearMath/Quaternion.h>
@@ -46,7 +41,8 @@ public:
     void cmdVelPublish(const Control &u);
     bool updateRobotState();
     void onReferencePath(const nav_msgs::msg::Path::SharedPtr msg);
-    void detectObstacles(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
+    void detectObstacles(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+    void detectObstacleUpdates(const map_msgs::msg::OccupancyGridUpdate::SharedPtr msg);
     void setSpeedCallback(const std_msgs::msg::Float64::SharedPtr msg);
     int findNearestWaypoint(const RobotState &state, size_t start_index);
 
@@ -95,13 +91,16 @@ private:
     void loadParameters();
     void updateReachedState();
     Control applySpeedLimit(const Control &u) const;
+    int normalizeCostmapCellToOcc100(int8_t raw_cell) const;
+    double costmapObstacleCost(double x, double y) const;
 
     rclcpp::TimerBase::SharedPtr timer_;
 
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr reached_pub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr obstacle_sub_;
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr obstacle_sub_;
+    rclcpp::Subscription<map_msgs::msg::OccupancyGridUpdate>::SharedPtr obstacle_update_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr speed_sub_;
 
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -125,6 +124,8 @@ private:
 
     size_t last_index_{0};
     std::mt19937 rng_;
-    std::vector<DynamicObstacle> dynamic_obstacles_;
+    nav_msgs::msg::MapMetaData latest_costmap_info_;
+    std::vector<int8_t> latest_costmap_data_;
+    bool has_costmap_{false};
 };
 }

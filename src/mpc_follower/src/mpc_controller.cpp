@@ -30,8 +30,11 @@ MpcController::MpcController(const rclcpp::NodeOptions & options)
 
     path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
         "/sPath", 10, std::bind(&MpcController::onReferencePath, this, std::placeholders::_1));
-    obstacle_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-        "/dynamic_obstacles", 10, std::bind(&MpcController::detectObstacles, this, std::placeholders::_1));
+    obstacle_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+        "/costmap/costmap", 10, std::bind(&MpcController::detectObstacles, this, std::placeholders::_1));
+    obstacle_update_sub_ = this->create_subscription<map_msgs::msg::OccupancyGridUpdate>(
+        "/costmap/costmap_updates", 10,
+        std::bind(&MpcController::detectObstacleUpdates, this, std::placeholders::_1));
     speed_sub_ = this->create_subscription<std_msgs::msg::Float64>(
         "/setFollowSpeed", 5, std::bind(&MpcController::setSpeedCallback, this, std::placeholders::_1));
 
@@ -157,8 +160,6 @@ double MpcController::objectiveFunction(const std::vector<double> &x, std::vecto
         return 0.0;
 
     double cost = 0.0;
-    constexpr double kEps = 1e-6;
-
     RobotState current = mpc->current_state_;
     const int nearest_idx = mpc->findNearestWaypoint(current, mpc->last_index_);
     mpc->last_index_ = static_cast<size_t>(nearest_idx);
@@ -174,17 +175,7 @@ double MpcController::objectiveFunction(const std::vector<double> &x, std::vecto
         cost += params.Wx * std::pow(current.x - ref.x, 2);
         cost += params.Wy * std::pow(current.y - ref.y, 2);
 
-        for (const auto &obs : mpc->dynamic_obstacles_)
-        {
-            const double dx_obs = current.x - obs.x;
-            const double dy_obs = current.y - obs.y;
-            const double d_obs = std::hypot(dx_obs, dy_obs);
-            const double safe_dist = params.ObstacleInflation + obs.radius;
-            if (d_obs < safe_dist && d_obs > kEps)
-            {
-                cost += params.Wobs * std::exp(1.0 / std::abs(d_obs - safe_dist));
-            }
-        }
+        cost += mpc->costmapObstacleCost(current.x, current.y);
 
         const double speed = std::hypot(current.vx, current.vy);
         const double speed_error = std::hypot(u.vx, u.vy) - params.TargetSpeed;
@@ -427,68 +418,141 @@ void MpcController::onReferencePath(const nav_msgs::msg::Path::SharedPtr msg)
     reached_flag_ = false;
 }
 
-void MpcController::detectObstacles(const sensor_msgs::msg::PointCloud2::SharedPtr cloud)
+int MpcController::normalizeCostmapCellToOcc100(int8_t raw_cell) const
 {
-    dynamic_obstacles_.clear();
-    pcl::PointCloud<pcl::PointXYZ>::Ptr raw(new pcl::PointCloud<pcl::PointXYZ>());
-    pcl::fromROSMsg(*cloud, *raw);
-
-    double L = 2.0;
-    pcl::CropBox<pcl::PointXYZ> crop;
-    crop.setInputCloud(raw);
-    crop.setMin(Eigen::Vector4f(-L, -L, -1.0, 1.0));
-    crop.setMax(Eigen::Vector4f(L, L, 2.0, 1.0));
-    crop.setTranslation(Eigen::Vector3f(current_state_.x, current_state_.y, 0));
-    crop.setRotation(Eigen::Vector3f(0, 0, 0));
-    pcl::PointCloud<pcl::PointXYZ>::Ptr windowed(new pcl::PointCloud<pcl::PointXYZ>());
-    crop.filter(*windowed);
-
-    pcl::PassThrough<pcl::PointXYZ> pass;
-    pass.setInputCloud(windowed);
-    pass.setFilterFieldName("z");
-    pass.setFilterLimits(0.1, 2.0);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZ>());
-    pass.filter(*filtered);
-
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>());
-    tree->setInputCloud(filtered);
-
-    std::vector<pcl::PointIndices> cluster_indices;
-    pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
-    ec.setClusterTolerance(0.5);
-    ec.setMinClusterSize(3);
-    ec.setMaxClusterSize(10000);
-    ec.setSearchMethod(tree);
-    ec.setInputCloud(filtered);
-    ec.extract(cluster_indices);
-
-    for (const auto &indices : cluster_indices)
+    if (raw_cell >= 0 && raw_cell <= 100)
     {
-        DynamicObstacle obs;
-        double cx = 0.0;
-        double cy = 0.0;
-        double r = 0.0;
+        return static_cast<int>(raw_cell);
+    }
 
-        for (int idx : indices.indices)
+    const int cell_u8 = static_cast<int>(static_cast<uint8_t>(raw_cell));
+    if (cell_u8 == 255)
+    {
+        return -1;
+    }
+    return static_cast<int>(std::round(static_cast<double>(cell_u8) * 100.0 / 254.0));
+}
+
+double MpcController::costmapObstacleCost(double x, double y) const
+{
+    if (!has_costmap_ || latest_costmap_data_.empty() || latest_costmap_info_.resolution <= 0.0)
+    {
+        return 0.0;
+    }
+
+    const int width = static_cast<int>(latest_costmap_info_.width);
+    const int height = static_cast<int>(latest_costmap_info_.height);
+    if (width <= 0 || height <= 0 ||
+        latest_costmap_data_.size() != static_cast<size_t>(width * height))
+    {
+        return 0.0;
+    }
+
+    const double resolution = static_cast<double>(latest_costmap_info_.resolution);
+    const double origin_x = latest_costmap_info_.origin.position.x;
+    const double origin_y = latest_costmap_info_.origin.position.y;
+    const int center_col = static_cast<int>(std::floor((x - origin_x) / resolution));
+    const int center_row = static_cast<int>(std::floor((y - origin_y) / resolution));
+    const int radius_cells =
+        std::max(0, static_cast<int>(std::ceil(params_.ObstacleInflation / resolution)));
+
+    int max_occ = 0;
+    for (int dr = -radius_cells; dr <= radius_cells; ++dr)
+    {
+        for (int dc = -radius_cells; dc <= radius_cells; ++dc)
         {
-            const auto &p = filtered->points[idx];
-            cx += p.x;
-            cy += p.y;
+            const double dist = std::hypot(static_cast<double>(dr), static_cast<double>(dc)) * resolution;
+            if (dist > params_.ObstacleInflation)
+            {
+                continue;
+            }
+
+            const int row = center_row + dr;
+            const int col = center_col + dc;
+            int occ = 100;
+            if (row >= 0 && row < height && col >= 0 && col < width)
+            {
+                occ = normalizeCostmapCellToOcc100(latest_costmap_data_[row * width + col]);
+                if (occ < 0)
+                {
+                    occ = 100;
+                }
+            }
+            max_occ = std::max(max_occ, occ);
         }
+    }
 
-        cx /= indices.indices.size();
-        cy /= indices.indices.size();
+    const double normalized_cost = static_cast<double>(max_occ) / 100.0;
+    return params_.Wobs * normalized_cost * normalized_cost;
+}
 
-        for (int idx : indices.indices)
+void MpcController::detectObstacles(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
+{
+    const int width = static_cast<int>(msg->info.width);
+    const int height = static_cast<int>(msg->info.height);
+    if (width <= 0 || height <= 0 ||
+        msg->data.size() != static_cast<size_t>(width * height))
+    {
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "Invalid costmap message: size=%dx%d data=%zu",
+            width, height, msg->data.size());
+        return;
+    }
+
+    latest_costmap_info_ = msg->info;
+    latest_costmap_data_ = msg->data;
+    has_costmap_ = true;
+
+    RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Received costmap: frame=%s size=%dx%d resolution=%.3f origin=(%.2f, %.2f)",
+        msg->header.frame_id.c_str(), width, height,
+        static_cast<double>(msg->info.resolution),
+        msg->info.origin.position.x, msg->info.origin.position.y);
+}
+
+void MpcController::detectObstacleUpdates(const map_msgs::msg::OccupancyGridUpdate::SharedPtr msg)
+{
+    if (!has_costmap_)
+    {
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "Skip costmap update: waiting for full /costmap/costmap message.");
+        return;
+    }
+
+    const int map_width = static_cast<int>(latest_costmap_info_.width);
+    const int map_height = static_cast<int>(latest_costmap_info_.height);
+    const int update_x = static_cast<int>(msg->x);
+    const int update_y = static_cast<int>(msg->y);
+    const int update_width = static_cast<int>(msg->width);
+    const int update_height = static_cast<int>(msg->height);
+    const int expected_size = update_width * update_height;
+
+    if (map_width <= 0 || map_height <= 0 ||
+        latest_costmap_data_.size() != static_cast<size_t>(map_width * map_height) ||
+        update_x < 0 || update_y < 0 || update_width <= 0 || update_height <= 0 ||
+        update_x + update_width > map_width || update_y + update_height > map_height ||
+        msg->data.size() != static_cast<size_t>(expected_size))
+    {
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "Invalid costmap update: region=(x%d,y%d,w%d,h%d) map=%dx%d data=%zu",
+            update_x, update_y, update_width, update_height,
+            map_width, map_height, msg->data.size());
+        return;
+    }
+
+    for (int local_row = 0; local_row < update_height; ++local_row)
+    {
+        const int map_row = update_y + local_row;
+        for (int local_col = 0; local_col < update_width; ++local_col)
         {
-            const auto &p = filtered->points[idx];
-            r = std::max(r, std::hypot(p.x - cx, p.y - cy));
+            const int map_col = update_x + local_col;
+            latest_costmap_data_[map_row * map_width + map_col] =
+                msg->data[local_row * update_width + local_col];
         }
-
-        obs.x = cx;
-        obs.y = cy;
-        obs.radius = r + 0.1;
-        dynamic_obstacles_.push_back(obs);
     }
 }
 
