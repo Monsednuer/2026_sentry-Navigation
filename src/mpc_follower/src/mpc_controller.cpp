@@ -28,8 +28,6 @@ MpcController::MpcController(const rclcpp::NodeOptions & options)
         std::chrono::milliseconds(static_cast<int>(params_.Ts * 1000)),
         std::bind(&MpcController::controlLoop, this));
 
-    odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        "/odom", 1, std::bind(&MpcController::updateRobotState, this, std::placeholders::_1));
     path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
         "/sPath", 10, std::bind(&MpcController::onReferencePath, this, std::placeholders::_1));
     obstacle_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -40,6 +38,8 @@ MpcController::MpcController(const rclcpp::NodeOptions & options)
     cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
     reached_pub_ = this->create_publisher<std_msgs::msg::Bool>("/ly/navi/reached", 10);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
     previous_control_ = {0.0, 0.0};
 }
@@ -74,6 +74,8 @@ void MpcController::loadParameters()
     params_.GlobalInitNoise = declare_parameter("GlobalInitNoise", GlobalInitNoise);
     params_.ObstacleInflation = declare_parameter("ObstacleInflation", ObstacleInflation);
     params_.Wobs = declare_parameter("Wobs", Wobs);
+    params_.GlobalFrame = declare_parameter("global_frame", std::string("map"));
+    params_.BaseFrame = declare_parameter("base_frame", std::string("base_link"));
 }
 
 void MpcController::configureGlobalOptimizer()
@@ -335,22 +337,71 @@ Control MpcController::computeControl()
     return u;
 }
 
-void MpcController::updateRobotState(const nav_msgs::msg::Odometry::SharedPtr msg)
+bool MpcController::updateRobotState()
 {
-    has_odom_ = true;
-    current_state_.vx = msg->twist.twist.linear.x;
-    current_state_.vy = msg->twist.twist.linear.y;
-    current_state_.omega = msg->twist.twist.angular.z;
-    current_state_.stamp = msg->header.stamp;
-    current_state_.x = msg->pose.pose.position.x;
-    current_state_.y = msg->pose.pose.position.y;
+    geometry_msgs::msg::TransformStamped transform;
+    try
+    {
+        transform = tf_buffer_->lookupTransform(
+            params_.GlobalFrame, params_.BaseFrame, tf2::TimePointZero);
+    }
+    catch (const tf2::TransformException &ex)
+    {
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 1000,
+            "TF lookup failed (%s <- %s): %s",
+            params_.GlobalFrame.c_str(), params_.BaseFrame.c_str(), ex.what());
+        return false;
+    }
+
+    rclcpp::Time stamp(transform.header.stamp);
+    if (stamp.nanoseconds() == 0)
+    {
+        stamp = this->now();
+    }
+
+    const double x = transform.transform.translation.x;
+    const double y = transform.transform.translation.y;
 
     tf2::Quaternion q(
-        msg->pose.pose.orientation.x,
-        msg->pose.pose.orientation.y,
-        msg->pose.pose.orientation.z,
-        msg->pose.pose.orientation.w);
-    current_state_.theta = tf2::getYaw(q);
+        transform.transform.rotation.x,
+        transform.transform.rotation.y,
+        transform.transform.rotation.z,
+        transform.transform.rotation.w);
+    const double theta = tf2::getYaw(q);
+
+    double vx_body = 0.0;
+    double vy_body = 0.0;
+    if (has_prev_tf_state_)
+    {
+        const double dt = (stamp - prev_tf_stamp_).seconds();
+        if (dt > 1e-4)
+        {
+            // 先差分 map 系位置，再转到机器人 body 系。
+            const double vx_map = (x - prev_tf_x_) / dt;
+            const double vy_map = (y - prev_tf_y_) / dt;
+            const double c = std::cos(theta);
+            const double s = std::sin(theta);
+            vx_body = c * vx_map + s * vy_map;
+            vy_body = -s * vx_map + c * vy_map;
+        }
+    }
+
+    current_state_.x = x;
+    current_state_.y = y;
+    current_state_.theta = theta;
+    current_state_.vx = vx_body;
+    current_state_.vy = vy_body;
+    // omega 不是优化变量，这里不做 yaw 差分。
+    current_state_.omega = 0.0;
+    current_state_.stamp = stamp;
+
+    prev_tf_x_ = x;
+    prev_tf_y_ = y;
+    prev_tf_stamp_ = stamp;
+    has_prev_tf_state_ = true;
+    has_state_ = true;
+    return true;
 }
 
 void MpcController::onReferencePath(const nav_msgs::msg::Path::SharedPtr msg)
@@ -457,7 +508,7 @@ void MpcController::setSpeedCallback(const std_msgs::msg::Float64::SharedPtr msg
 Control MpcController::applySpeedLimit(const Control &u) const
 {
     double speed_limit = params_.TargetSpeed;
-    if (!reference_path_.empty() && has_odom_ && params_.ReachSlowDistance > params_.ReachStopDistance)
+    if (!reference_path_.empty() && has_state_ && params_.ReachSlowDistance > params_.ReachStopDistance)
     {
         const auto &goal = reference_path_.back();
         const double distance = std::hypot(current_state_.x - goal.x, current_state_.y - goal.y);
@@ -483,7 +534,7 @@ Control MpcController::applySpeedLimit(const Control &u) const
 void MpcController::updateReachedState()
 {
     std_msgs::msg::Bool reached_msg;
-    if (reference_path_.empty() || !has_odom_)
+    if (reference_path_.empty() || !has_state_)
     {
         reached_flag_ = false;
         reached_msg.data = reached_flag_;
@@ -510,10 +561,9 @@ void MpcController::publishVisualization()
 
 void MpcController::controlLoop()
 {
-    static rclcpp::Time last_time_stamp;
-    updateReachedState();
+    static rclcpp::Time last_state_stamp;
 
-    if (!has_odom_ || reference_path_.empty() || reached_flag_)
+    if (!updateRobotState())
     {
         Control stop_cmd{0.0, 0.0};
         cmdVelPublish(stop_cmd);
@@ -521,14 +571,24 @@ void MpcController::controlLoop()
         return;
     }
 
-    if (current_state_.stamp == last_time_stamp)
+    updateReachedState();
+
+    if (!has_state_ || reference_path_.empty() || reached_flag_)
     {
-        RCLCPP_WARN(get_logger(), "No new odom data!");
+        Control stop_cmd{0.0, 0.0};
+        cmdVelPublish(stop_cmd);
+        previous_control_ = stop_cmd;
+        return;
+    }
+
+    if (current_state_.stamp == last_state_stamp)
+    {
+        RCLCPP_WARN(get_logger(), "No new tf state data!");
         Control failed_cmd{0.0, 0.0};
         cmdVelPublish(failed_cmd);
         return;
     }
-    last_time_stamp = current_state_.stamp;
+    last_state_stamp = current_state_.stamp;
 
     Control u = computeControl();
     u = applySpeedLimit(u);

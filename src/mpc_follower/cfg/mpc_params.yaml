@@ -4,6 +4,10 @@
     Ts: 0.05
     N: 30
 
+    # TF 状态来源
+    global_frame: "map"
+    base_frame: "base_link"
+
     # Robot physical constraints
     MinR: 0.0
     MaxLinear: 2.0

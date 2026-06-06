@@ -5,11 +5,12 @@
 #include <cmath>
 #include <iostream>
 #include <random>
+#include <string>
 #include <vector>
 
 #include <nlopt.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
-#include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <pcl/filters/crop_box.h>
 #include <pcl/filters/extract_indices.h>
@@ -43,7 +44,7 @@ public:
     void configureLocalOptimizer();
     void controlLoop();
     void cmdVelPublish(const Control &u);
-    void updateRobotState(const nav_msgs::msg::Odometry::SharedPtr msg);
+    bool updateRobotState();
     void onReferencePath(const nav_msgs::msg::Path::SharedPtr msg);
     void detectObstacles(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
     void setSpeedCallback(const std_msgs::msg::Float64::SharedPtr msg);
@@ -87,6 +88,8 @@ private:
         double Wobs{};
         int N{};
         bool UseTurningRadius{};
+        std::string GlobalFrame{"map"};
+        std::string BaseFrame{"base_link"};
     } params_;
 
     void loadParameters();
@@ -98,7 +101,6 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr reached_pub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr obstacle_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr speed_sub_;
 
@@ -109,8 +111,12 @@ private:
     RobotState current_state_;
     Control previous_control_;
     std::vector<PathPoint> reference_path_;
-    bool has_odom_{false};
+    bool has_state_{false};
+    bool has_prev_tf_state_{false};
     bool reached_flag_{false};
+    double prev_tf_x_{0.0};
+    double prev_tf_y_{0.0};
+    rclcpp::Time prev_tf_stamp_;
 
     nlopt::opt global_optimizer_;
     nlopt::opt local_optimizer_;
