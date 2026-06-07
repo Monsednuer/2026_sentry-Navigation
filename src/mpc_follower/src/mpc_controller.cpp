@@ -30,6 +30,7 @@ MpcController::MpcController(const rclcpp::NodeOptions & options)
 
     path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
         "/sPath", 10, std::bind(&MpcController::onReferencePath, this, std::placeholders::_1));
+    // 直接订阅 costmap，全量图和增量更新共同维护最新障碍物代价。
     obstacle_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
         "/costmap/costmap", 10, std::bind(&MpcController::detectObstacles, this, std::placeholders::_1));
     obstacle_update_sub_ = this->create_subscription<map_msgs::msg::OccupancyGridUpdate>(
@@ -175,6 +176,7 @@ double MpcController::objectiveFunction(const std::vector<double> &x, std::vecto
         cost += params.Wx * std::pow(current.x - ref.x, 2);
         cost += params.Wy * std::pow(current.y - ref.y, 2);
 
+        // 障碍物代价直接查询 costmap，不再依赖点云聚类结果。
         cost += mpc->costmapObstacleCost(current.x, current.y);
 
         const double speed = std::hypot(current.vx, current.vy);
@@ -420,6 +422,7 @@ void MpcController::onReferencePath(const nav_msgs::msg::Path::SharedPtr msg)
 
 int MpcController::normalizeCostmapCellToOcc100(int8_t raw_cell) const
 {
+    // 兼容标准 OccupancyGrid 和 Nav2 costmap 的 0..254/255 编码。
     if (raw_cell >= 0 && raw_cell <= 100)
     {
         return static_cast<int>(raw_cell);
@@ -435,6 +438,7 @@ int MpcController::normalizeCostmapCellToOcc100(int8_t raw_cell) const
 
 double MpcController::costmapObstacleCost(double x, double y) const
 {
+    // 在 ObstacleInflation 半径内取最大 cost，避免代价受分辨率影响。
     if (!has_costmap_ || latest_costmap_data_.empty() || latest_costmap_info_.resolution <= 0.0)
     {
         return 0.0;
@@ -469,6 +473,7 @@ double MpcController::costmapObstacleCost(double x, double y) const
 
             const int row = center_row + dr;
             const int col = center_col + dc;
+            // unknown 或越界区域按障碍处理，代价值为 100。
             int occ = 100;
             if (row >= 0 && row < height && col >= 0 && col < width)
             {
@@ -488,6 +493,7 @@ double MpcController::costmapObstacleCost(double x, double y) const
 
 void MpcController::detectObstacles(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
 {
+    // 收到全量 costmap 时整体刷新本地缓存。
     const int width = static_cast<int>(msg->info.width);
     const int height = static_cast<int>(msg->info.height);
     if (width <= 0 || height <= 0 ||
@@ -549,6 +555,7 @@ void MpcController::detectObstacleUpdates(const map_msgs::msg::OccupancyGridUpda
         const int map_row = update_y + local_row;
         for (int local_col = 0; local_col < update_width; ++local_col)
         {
+            // 将 costmap_updates 的局部窗口覆盖到本地全量缓存。
             const int map_col = update_x + local_col;
             latest_costmap_data_[map_row * map_width + map_col] =
                 msg->data[local_row * update_width + local_col];
