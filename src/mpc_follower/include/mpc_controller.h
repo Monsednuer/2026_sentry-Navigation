@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <nlopt.hpp>
+#include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <map_msgs/msg/occupancy_grid_update.hpp>
@@ -34,7 +35,7 @@ public:
     explicit MpcController(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
 
     Control computeControl();
-    void publishVisualization();
+    void publishVisualization(const Control &next_control);
     void configureGlobalOptimizer();
     void configureLocalOptimizer();
     void controlLoop();
@@ -82,6 +83,7 @@ private:
         double GlobalInitNoise{};
         double ObstacleInflation{};
         double Wobs{};
+        double VelocityVectorScale{};
         int N{};
         bool UseTurningRadius{};
         std::string GlobalFrame{"map"};
@@ -98,6 +100,8 @@ private:
 
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr reached_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr predicted_path_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr velocity_vector_pub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr obstacle_sub_;
     rclcpp::Subscription<map_msgs::msg::OccupancyGridUpdate>::SharedPtr obstacle_update_sub_;

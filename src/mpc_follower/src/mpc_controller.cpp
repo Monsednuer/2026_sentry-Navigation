@@ -41,6 +41,10 @@ MpcController::MpcController(const rclcpp::NodeOptions & options)
 
     cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
     reached_pub_ = this->create_publisher<std_msgs::msg::Bool>("/ly/navi/reached", 10);
+    // 发布 MPC 预测轨迹 Path，以及下一步速度向量箭头。
+    predicted_path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/mpc/predicted_path", 10);
+    velocity_vector_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(
+        "/mpc/next_velocity_vector", 10);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -78,6 +82,8 @@ void MpcController::loadParameters()
     params_.GlobalInitNoise = declare_parameter("GlobalInitNoise", GlobalInitNoise);
     params_.ObstacleInflation = declare_parameter("ObstacleInflation", ObstacleInflation);
     params_.Wobs = declare_parameter("Wobs", Wobs);
+    // 将 m/s 速度值缩放为 RViz 中易观察的箭头长度。
+    params_.VelocityVectorScale = declare_parameter("velocity_vector_scale", 0.5);
     params_.GlobalFrame = declare_parameter("global_frame", std::string("map"));
     params_.BaseFrame = declare_parameter("base_frame", std::string("base_link"));
 }
@@ -620,14 +626,80 @@ void MpcController::updateReachedState()
     reached_pub_->publish(reached_msg);
 }
 
-void MpcController::publishVisualization()
+void MpcController::publishVisualization(const Control &next_control)
 {
-    visualization_msgs::msg::Marker predict_marker;
-    predict_marker.header.frame_id = "map";
-    predict_marker.header.stamp = this->now();
-    predict_marker.ns = "mpc_predict";
-    predict_marker.id = 0;
-    predict_marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    if (!predicted_path_pub_ || !velocity_vector_pub_)
+        return;
+
+    const rclcpp::Time stamp = this->now();
+
+    nav_msgs::msg::Path predicted_path;
+    predicted_path.header.frame_id = params_.GlobalFrame;
+    predicted_path.header.stamp = stamp;
+
+    auto append_pose = [&predicted_path](const RobotState &state) {
+        geometry_msgs::msg::PoseStamped pose;
+        pose.header = predicted_path.header;
+        pose.pose.position.x = state.x;
+        pose.pose.position.y = state.y;
+        pose.pose.position.z = 0.0;
+
+        tf2::Quaternion q;
+        q.setRPY(0.0, 0.0, state.theta);
+        pose.pose.orientation = tf2::toMsg(q);
+        predicted_path.poses.push_back(pose);
+    };
+
+    RobotState predicted_state = current_state_;
+    append_pose(predicted_state);
+
+    // Path 包含当前位姿和 N 个预测位姿，对应 N 段预测轨迹。
+    if (opt_result_.size() >= static_cast<size_t>(2 * params_.N))
+    {
+        for (int i = 0; i < params_.N; ++i)
+        {
+            Control step_control{opt_result_[2 * i], opt_result_[2 * i + 1]};
+            predicted_state = predictState(predicted_state, step_control, params_.Ts, this);
+            append_pose(predicted_state);
+        }
+    }
+
+    predicted_path_pub_->publish(predicted_path);
+
+    visualization_msgs::msg::Marker velocity_marker;
+    velocity_marker.header.frame_id = params_.GlobalFrame;
+    velocity_marker.header.stamp = stamp;
+    velocity_marker.ns = "mpc_next_velocity";
+    velocity_marker.id = 0;
+    velocity_marker.type = visualization_msgs::msg::Marker::ARROW;
+    velocity_marker.action = visualization_msgs::msg::Marker::ADD;
+    velocity_marker.pose.orientation.w = 1.0;
+    velocity_marker.scale.x = 0.04;
+    velocity_marker.scale.y = 0.12;
+    velocity_marker.scale.z = 0.12;
+    velocity_marker.color.r = 1.0;
+    velocity_marker.color.g = 0.15;
+    velocity_marker.color.b = 0.05;
+    velocity_marker.color.a = 0.95;
+
+    // 控制量在机器人本体系下，显示前先旋转到 map 系。
+    const double c = std::cos(current_state_.theta);
+    const double s = std::sin(current_state_.theta);
+    const double vx_map = next_control.vx * c - next_control.vy * s;
+    const double vy_map = next_control.vx * s + next_control.vy * c;
+
+    geometry_msgs::msg::Point start;
+    start.x = current_state_.x;
+    start.y = current_state_.y;
+    start.z = 0.1;
+
+    geometry_msgs::msg::Point end = start;
+    end.x += vx_map * params_.VelocityVectorScale;
+    end.y += vy_map * params_.VelocityVectorScale;
+
+    velocity_marker.points.push_back(start);
+    velocity_marker.points.push_back(end);
+    velocity_vector_pub_->publish(velocity_marker);
 }
 
 void MpcController::controlLoop()
@@ -663,6 +735,7 @@ void MpcController::controlLoop()
 
     Control u = computeControl();
     u = applySpeedLimit(u);
+    publishVisualization(u);
     cmdVelPublish(u);
     previous_control_ = u;
 }

@@ -45,3 +45,6 @@
     # Obstacle parameters
     ObstacleInflation: 0.5
     Wobs: 100.0
+
+    # Visualization parameters
+    velocity_vector_scale: 0.5
