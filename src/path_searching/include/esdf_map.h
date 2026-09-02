@@ -41,6 +41,19 @@ public:
     Eigen::Vector2i getNearestObstacleIndex(Eigen::Vector2i pos_);
     void getMapRegion(Eigen::Vector2i & map_size_){map_size_ =  Size;}
 
+    // ===================== 连续坐标插值查询（报告5.5.2.2） =====================
+    // 栅格分辨率（米/格），与 Index2pos/Pos2index 中的 20.0 对应
+    static constexpr double kResolution = 0.05;
+    // 输入：地图坐标系位置（米）；输出距离单位：米；梯度无量纲（方向远离障碍物）。
+    // 采样点为 Cell 中心，cell (r,c) 中心对应 ((c+0.5)*res+ox, (r+0.5)*res+oy)。
+    // 双线性插值（基线，用于对比；峡谷脊线处梯度不连续，存在梯度无效化问题）
+    double getDistBilinear(const Eigen::Vector2d& pos_m) const;
+    Eigen::Vector2d getGradBilinear(const Eigen::Vector2d& pos_m) const;
+    // 双二次 Lagrange 插值（3x3 邻域，每个方向三点拟合二次函数）：
+    // 距离与梯度均解析、平滑，解决峡谷形障碍物中间梯度无效化问题
+    double getDistQuadratic(const Eigen::Vector2d& pos_m) const;
+    Eigen::Vector2d getGradQuadratic(const Eigen::Vector2d& pos_m) const;
+
     Eigen::Vector2d Index2pos(Eigen::Vector2i index_)
     {
         Eigen::Vector2d index_d((double)index_[1], (double)index_[0]);

@@ -32,7 +32,8 @@ DynamicVoronoi::~DynamicVoronoi() {
     for (int x=0; x<sizeX; x++) delete[] data[x];
     delete[] data;
   }
-  if (gridMap) {
+  // 仅释放自分配的 gridMap；外部传入的（如 esdf::bin_map）由所有者释放
+  if (gridMap && ownGridMap) {
     for (int x=0; x<sizeX; x++) delete[] gridMap[x];
     delete[] gridMap;
   }
@@ -54,7 +55,7 @@ void DynamicVoronoi::initializeEmpty(int _sizeX, int _sizeY, bool initGridMap) {
   for (int x=0; x<sizeX; x++) data[x] = new dataCell[sizeY];
 
   if (initGridMap) {
-    if (gridMap) {
+    if (gridMap && ownGridMap) {
       for (int x=0; x<sizeX; x++) delete[] gridMap[x];
       delete[] gridMap;
     }
@@ -66,6 +67,7 @@ void DynamicVoronoi::initializeEmpty(int _sizeX, int _sizeY, bool initGridMap) {
 
     gridMap = new bool*[sizeX];
     for (int x=0; x<sizeX; x++) gridMap[x] = new bool[sizeY];
+    ownGridMap = true;
 
     // voronoi_grid_ = new bool*[sizeX];
     // for (int x=0; x<sizeX; x++) voronoi_grid_[x] = new bool[sizeY];
@@ -96,6 +98,7 @@ void DynamicVoronoi::initializeEmpty(int _sizeX, int _sizeY, bool initGridMap) {
 
 void DynamicVoronoi::initializeMap(int _sizeX, int _sizeY, bool** _gridMap) {
   gridMap = _gridMap;
+  ownGridMap = false;  // 外部内存，不拥有
   initializeEmpty(_sizeX, _sizeY, false);
 
   for (int x=0; x<sizeX; x++) {

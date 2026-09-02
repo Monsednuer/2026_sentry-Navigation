@@ -124,6 +124,9 @@ class DynamicVoronoi {
   int findy;
   dataCell** data;
   bool** gridMap;
+  // gridMap 所有权：initializeEmpty(initGridMap=true) 自分配时为 true；
+  // initializeMap(外部传入指针) 时为 false。析构仅释放自有 gridMap，避免 double-free。
+  bool ownGridMap = false;
 //   bool** voronoi_grid_;
 
   // parameters

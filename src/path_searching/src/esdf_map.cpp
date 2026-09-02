@@ -221,6 +221,130 @@ Eigen::Vector2i esdf::getNearestObstacleIndex(Eigen::Vector2i pos_)
     return idx;
 }
 
+// ===================== 连续坐标插值查询实现 =====================
+namespace {
+
+// 地图坐标（米） -> Cell 中心连续坐标（格）：cell (r,c) 中心为 (col_f=c, row_f=r)
+inline void posToCellF(const Eigen::Vector2d& pos_m, const Eigen::Vector2d& offset,
+                       double res, double& col_f, double& row_f)
+{
+    col_f = (pos_m[0] - offset[0]) / res - 0.5;
+    row_f = (pos_m[1] - offset[1]) / res - 0.5;
+}
+
+inline int clampInt(int v, int lo, int hi)
+{
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+}  // namespace
+
+double esdf::getDistBilinear(const Eigen::Vector2d& pos_m) const
+{
+    double col_f, row_f;
+    posToCellF(pos_m, Offset, kResolution, col_f, row_f);
+
+    if (Size[0] < 2 || Size[1] < 2)
+    {
+        Eigen::Vector2i idx(clampInt((int)std::lround(row_f), 0, Size[0] - 1),
+                            clampInt((int)std::lround(col_f), 0, Size[1] - 1));
+        return voronoi_map.data[idx[0]][idx[1]].dist * kResolution;
+    }
+
+    int c0 = clampInt((int)std::floor(col_f), 0, Size[1] - 2);
+    int r0 = clampInt((int)std::floor(row_f), 0, Size[0] - 2);
+    double tx = std::min(1.0, std::max(0.0, col_f - c0));
+    double ty = std::min(1.0, std::max(0.0, row_f - r0));
+
+    const double v00 = voronoi_map.data[r0][c0].dist;
+    const double v01 = voronoi_map.data[r0 + 1][c0].dist;
+    const double v10 = voronoi_map.data[r0][c0 + 1].dist;
+    const double v11 = voronoi_map.data[r0 + 1][c0 + 1].dist;
+
+    const double v = (1.0 - tx) * (1.0 - ty) * v00 + tx * (1.0 - ty) * v10
+                   + (1.0 - tx) * ty * v01 + tx * ty * v11;
+    return v * kResolution;
+}
+
+Eigen::Vector2d esdf::getGradBilinear(const Eigen::Vector2d& pos_m) const
+{
+    double col_f, row_f;
+    posToCellF(pos_m, Offset, kResolution, col_f, row_f);
+
+    if (Size[0] < 2 || Size[1] < 2) return Eigen::Vector2d(0.0, 0.0);
+
+    int c0 = clampInt((int)std::floor(col_f), 0, Size[1] - 2);
+    int r0 = clampInt((int)std::floor(row_f), 0, Size[0] - 2);
+    double tx = std::min(1.0, std::max(0.0, col_f - c0));
+    double ty = std::min(1.0, std::max(0.0, row_f - r0));
+
+    const double v00 = voronoi_map.data[r0][c0].dist;
+    const double v01 = voronoi_map.data[r0 + 1][c0].dist;
+    const double v10 = voronoi_map.data[r0][c0 + 1].dist;
+    const double v11 = voronoi_map.data[r0 + 1][c0 + 1].dist;
+
+    // d(dist_m)/d(x_m) == d(dist_cells)/d(col_f)，数值相同（res 与 1/res 相消）
+    const double gx = (v10 - v00) * (1.0 - ty) + (v11 - v01) * ty;
+    const double gy = (v01 - v00) * (1.0 - tx) + (v11 - v10) * tx;
+    return Eigen::Vector2d(gx, gy);
+}
+
+double esdf::getDistQuadratic(const Eigen::Vector2d& pos_m) const
+{
+    double col_f, row_f;
+    posToCellF(pos_m, Offset, kResolution, col_f, row_f);
+
+    if (Size[0] < 3 || Size[1] < 3) return getDistBilinear(pos_m);
+
+    // 3x3 模板中心：取最近 Cell 中心，并保证模板不越界
+    int cx = clampInt((int)std::lround(col_f), 1, Size[1] - 2);
+    int cy = clampInt((int)std::lround(row_f), 1, Size[0] - 2);
+    double fx = std::min(1.0, std::max(-1.0, col_f - cx));
+    double fy = std::min(1.0, std::max(-1.0, row_f - cy));
+
+    // 节点 -1/0/+1 上的二次 Lagrange 基
+    const double lx[3] = {fx * (fx - 1.0) * 0.5, 1.0 - fx * fx, fx * (fx + 1.0) * 0.5};
+    const double ly[3] = {fy * (fy - 1.0) * 0.5, 1.0 - fy * fy, fy * (fy + 1.0) * 0.5};
+
+    double v = 0.0;
+    for (int j = 0; j < 3; ++j)
+        for (int i = 0; i < 3; ++i)
+            v += voronoi_map.data[cy + j - 1][cx + i - 1].dist * lx[i] * ly[j];
+    return v * kResolution;
+}
+
+Eigen::Vector2d esdf::getGradQuadratic(const Eigen::Vector2d& pos_m) const
+{
+    double col_f, row_f;
+    posToCellF(pos_m, Offset, kResolution, col_f, row_f);
+
+    if (Size[0] < 3 || Size[1] < 3) return getGradBilinear(pos_m);
+
+    int cx = clampInt((int)std::lround(col_f), 1, Size[1] - 2);
+    int cy = clampInt((int)std::lround(row_f), 1, Size[0] - 2);
+    double fx = std::min(1.0, std::max(-1.0, col_f - cx));
+    double fy = std::min(1.0, std::max(-1.0, row_f - cy));
+
+    const double lx[3]  = {fx * (fx - 1.0) * 0.5, 1.0 - fx * fx, fx * (fx + 1.0) * 0.5};
+    const double ly[3]  = {fy * (fy - 1.0) * 0.5, 1.0 - fy * fy, fy * (fy + 1.0) * 0.5};
+    // 基函数导数（对 fx/fy）
+    const double dlx[3] = {fx - 0.5, -2.0 * fx, fx + 0.5};
+    const double dly[3] = {fy - 0.5, -2.0 * fy, fy + 0.5};
+
+    double gx = 0.0, gy = 0.0;
+    for (int j = 0; j < 3; ++j)
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            const double v = voronoi_map.data[cy + j - 1][cx + i - 1].dist;
+            gx += v * dlx[i] * ly[j];
+            gy += v * lx[i] * dly[j];
+        }
+    }
+    // 单位换算说明同 getGradBilinear：米制梯度 == 格制梯度
+    return Eigen::Vector2d(gx, gy);
+}
+
 esdf::esdf() {}
 
 esdf::~esdf()
