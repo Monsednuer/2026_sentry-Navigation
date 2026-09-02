@@ -57,6 +57,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   src/bucketedqueue.cpp
   src/dynamicvoronoi.cpp
   src/esdf_map.cpp
+  src/jps.cpp
   src/smoother.cpp
 )
 ament_target_dependencies(${PROJECT_NAME}_lib

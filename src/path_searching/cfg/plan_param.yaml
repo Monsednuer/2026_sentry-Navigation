@@ -86,3 +86,12 @@
     stall_move_threshold: 0.05
     # 距离目标小于该值（m）时，不触发停滞重规划
     stall_goal_distance_threshold: 0.30
+
+    # ===================== [G] JPS 前端（第二步，报告5.5.3 思路一） =====================
+    use_jps_frontend: false     # 灰度开关：true=JPS+时间分配，false=原A*+smoother
+    jps_time_k1: 1.0
+    jps_time_k2: 0.3
+    jps_vmax: 1.8
+    jps_amax: 1.5
+    jps_dt: 0.1
+    jps_sample_ds: 0.05

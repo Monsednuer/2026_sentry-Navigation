@@ -8,6 +8,7 @@
 #include <Eigen/Core>
 #include <cmath>
 #include "smoother.h"
+#include "jps.h"
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <pcl_conversions/pcl_conversions.h>
@@ -73,6 +74,14 @@ public:
     this->declare_parameter<bool>("enable_goal_escape_mode", true);
     this->declare_parameter<double>("goal_escape_search_radius", 0.80);
     this->declare_parameter<double>("goal_escape_clearance_tolerance", 0.08);
+    // [JPS_V1] JPS frontend (report 5.5.3)
+    this->declare_parameter<bool>("use_jps_frontend", false);
+    this->declare_parameter<double>("jps_time_k1", 1.0);
+    this->declare_parameter<double>("jps_time_k2", 0.3);
+    this->declare_parameter<double>("jps_vmax", 1.8);
+    this->declare_parameter<double>("jps_amax", 1.5);
+    this->declare_parameter<double>("jps_dt", 0.1);
+    this->declare_parameter<double>("jps_sample_ds", 0.05);
 
     this->get_parameter("enable_downstairs", enable_downstaris);
     this->get_parameter("obstacle_expand_radius", obstacle_expand_radius);
@@ -111,6 +120,13 @@ public:
     this->get_parameter("enable_goal_escape_mode", enable_goal_escape_mode_);
     this->get_parameter("goal_escape_search_radius", goal_escape_search_radius_);
     this->get_parameter("goal_escape_clearance_tolerance", goal_escape_clearance_tolerance_);
+    this->get_parameter("use_jps_frontend", use_jps_frontend_);
+    this->get_parameter("jps_time_k1", jps_time_k1_);
+    this->get_parameter("jps_time_k2", jps_time_k2_);
+    this->get_parameter("jps_vmax", jps_vmax_);
+    this->get_parameter("jps_amax", jps_amax_);
+    this->get_parameter("jps_dt", jps_dt_);
+    this->get_parameter("jps_sample_ds", jps_sample_ds_);
 
     RCLCPP_INFO(this->get_logger(), "[Params] [enable_downstairs] : %s", enable_downstaris ? "true" : "false");
     RCLCPP_INFO(this->get_logger(), "[Params] [obstacle_expand_radius] : %f", obstacle_expand_radius);
@@ -139,6 +155,7 @@ public:
     RCLCPP_INFO(this->get_logger(), "[Params] [enable_goal_escape_mode] : %s", enable_goal_escape_mode_ ? "true" : "false");
     RCLCPP_INFO(this->get_logger(), "[Params] [goal_escape_search_radius] : %f", goal_escape_search_radius_);
     RCLCPP_INFO(this->get_logger(), "[Params] [goal_escape_clearance_tolerance] : %f", goal_escape_clearance_tolerance_);
+    RCLCPP_INFO(this->get_logger(), "[Params] [use_jps_frontend] : %s", use_jps_frontend_ ? "true" : "false");
 
     // map_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
     //   "/map", 1, std::bind(&PlanManager::map_callback, this, std::placeholders::_1));
@@ -192,6 +209,7 @@ private:
   ESDF_enviroment::Ptr esdf_1;
   navi_planner::Astar planner_1;
   navi_planner::smoother smoother_1;
+  navi_planner::JPS jps_planner_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
@@ -238,6 +256,13 @@ private:
   bool enable_goal_escape_mode_{true};
   double goal_escape_search_radius_{0.80};
   double goal_escape_clearance_tolerance_{0.08};
+  bool use_jps_frontend_{false};
+  double jps_time_k1_{1.0};
+  double jps_time_k2_{0.3};
+  double jps_vmax_{1.8};
+  double jps_amax_{1.5};
+  double jps_dt_{0.1};
+  double jps_sample_ds_{0.05};
   std::vector<Eigen::Vector2i> dynamic_cells_from_pointcloud_;
   std::vector<Eigen::Vector2i> dynamic_cells_from_costmap_;
   std::vector<Eigen::Vector2i> dynamic_cells_from_blocked_memory_;
@@ -1279,6 +1304,7 @@ private:
     
     RCLCPP_INFO(this->get_logger(), "ESDF map initialized");
     planner_1.setEnvironment(esdf_1);
+    jps_planner_.setEnvironment(esdf_1);
     const double min_clearance_cells = requiredClearanceMeters() / resolution;
     planner_1.setParam(
       obstacle_cost_weight,
@@ -1330,6 +1356,26 @@ private:
       astar_debug.c_str());
   }
 
+  // [JPS_V1] 起点被占据时，环形向外搜索最近自由栅格（替代 A* 的起点逃生）
+  bool findNearestFreeCell(const Eigen::Vector2i &idx, int max_radius, Eigen::Vector2i &out)
+  {
+    if (!esdf_1->checkCollision(idx)) { out = idx; return true; }
+    for (int r = 1; r <= max_radius; ++r)
+    {
+      for (int dr = -r; dr <= r; ++dr)
+      {
+        for (int dc = -r; dc <= r; ++dc)
+        {
+          if (std::max(std::abs(dr), std::abs(dc)) != r) continue;
+          Eigen::Vector2i cand(idx[0] + dr, idx[1] + dc);
+          if (cand[0] < 0 || cand[1] < 0 || cand[0] >= map_size[0] || cand[1] >= map_size[1]) continue;
+          if (!esdf_1->checkCollision(cand)) { out = cand; return true; }
+        }
+      }
+    }
+    return false;
+  }
+
   void plan(Eigen::Vector2d start_, Eigen::Vector2d goal_)
   {
     if (!map_geted)
@@ -1368,8 +1414,67 @@ private:
     applyGoalEscapeIfNeeded(start_, goal_, end_index, planning_goal);
 
 		    RCLCPP_INFO(this->get_logger(), "Start planning...");
-		    
+
 		    auto beforeTime = std::chrono::steady_clock::now();
+    std::vector<Eigen::Vector2d> Path_2d;
+    auto msg = std_msgs::msg::Bool();
+
+    if (use_jps_frontend_)
+    {
+      // ===================== [JPS_V1] JPS 前端 + 时间分配（报告5.5.3 思路一） =====================
+      bool jps_ok = jps_planner_.search(start_, planning_goal, Path_2d);
+      if (!jps_ok && enable_start_escape_mode_ && esdf_1->checkCollision(start_index))
+      {
+        Eigen::Vector2i free_idx;
+        if (findNearestFreeCell(start_index, std::max(start_escape_steps_, 40), free_idx))
+        {
+          const Eigen::Vector2d escaped_start = Index2pos(free_idx);
+          jps_ok = jps_planner_.search(escaped_start, planning_goal, Path_2d);
+          if (jps_ok && !Path_2d.empty())
+          {
+            Path_2d.insert(Path_2d.begin(), start_);
+            RCLCPP_WARN(this->get_logger(), "[JPS] start occupied, escaped to cell (%d,%d)", free_idx[0], free_idx[1]);
+          }
+        }
+      }
+      if (!jps_ok)
+      {
+        logNoPathDiagnostics("jps_no_path", start_, goal_, planning_goal, start_index, end_index);
+        msg.data = false;
+        reachable_pub_->publish(msg);
+        return;
+      }
+      msg.data = true;
+      reachable_pub_->publish(msg);
+
+      auto endTime = std::chrono::steady_clock::now();
+      double duration_millsecond = std::chrono::duration<double, std::milli>(endTime - beforeTime).count();
+      std::cout << "JPS searching cost: " << duration_millsecond << "ms" << std::endl;
+
+      // 时间分配（思路一：梯形加减速）+ 等弧长密采样发 /sPath
+      beforeTime = std::chrono::steady_clock::now();
+      auto timed = navi_planner::allocateTimeTrapezoid(
+        Path_2d, jps_time_k1_, jps_time_k2_, jps_vmax_, jps_amax_, jps_dt_);
+      std::vector<Eigen::Vector2d> timed_pos;
+      timed_pos.reserve(timed.size());
+      for (const auto &tp : timed) timed_pos.push_back(tp.pos);
+      Path_2d = navi_planner::resampleByArcLength(timed_pos, jps_sample_ds_);
+      if (Path_2d.empty())
+      {
+        RCLCPP_WARN(this->get_logger(), "[JPS] resampled path empty, fallback to timed waypoints");
+        Path_2d = timed_pos;
+      }
+      if (!Path_2d.empty())
+      {
+        Path_2d.front() = start_;
+        Path_2d.back() = planning_goal;
+      }
+      endTime = std::chrono::steady_clock::now();
+      duration_millsecond = std::chrono::duration<double, std::milli>(endTime - beforeTime).count();
+      std::cout << "JPS time-alloc + resample cost: " << duration_millsecond << "ms" << std::endl;
+    }
+    else
+    {
 		    auto result = planner_1.search(start_index, end_index);
     bool retried_start_escape = false;
     const bool start_in_collision = esdf_1->checkCollision(start_index);
@@ -1409,7 +1514,6 @@ private:
       }
     }
 
-    auto msg = std_msgs::msg::Bool();
     if (result == navi_planner::Astar::NO_PATH)
     {
       logNoPathDiagnostics(
@@ -1435,7 +1539,6 @@ private:
     std::cout << "A* searching cost: " << duration_millsecond << "ms" << std::endl;
     
     std::vector<Eigen::Vector2i> Path_2i = planner_1.getPath();
-    std::vector<Eigen::Vector2d> Path_2d;
 
     Path_2d.reserve(Path_2i.size() + 2);
     Path_2d.push_back(start_);
@@ -1475,7 +1578,8 @@ private:
     {
       Path_2d.push_back(planning_goal);
     }
-    
+    }  // end else: A* + smoother 分支
+
     planner_1.reset();
     path_now = Path_2d;
     Path_pub(Path_2d);
