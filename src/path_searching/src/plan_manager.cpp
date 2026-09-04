@@ -9,6 +9,7 @@
 #include <cmath>
 #include "smoother.h"
 #include "jps.h"
+#include "traj_optimizer.h"
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <pcl_conversions/pcl_conversions.h>
@@ -82,6 +83,19 @@ public:
     this->declare_parameter<double>("jps_amax", 1.5);
     this->declare_parameter<double>("jps_dt", 0.1);
     this->declare_parameter<double>("jps_sample_ds", 0.05);
+    // [MINCO_V1] MINCO backend (report 5.5.3.2 / 第三步)
+    this->declare_parameter<bool>("use_minco_backend", false);
+    this->declare_parameter<double>("opt_ctrl_pt_interval", 0.4);
+    this->declare_parameter<double>("opt_sample_dt", 0.05);
+    this->declare_parameter<int>("opt_max_iter", 200);
+    this->declare_parameter<double>("opt_max_time_ms", 80.0);
+    this->declare_parameter<double>("esdf_grad_radius", 0.6);
+    this->declare_parameter<double>("w_energy", 1.0);
+    this->declare_parameter<double>("w_collision", 500.0);
+    this->declare_parameter<double>("w_vel", 10.0);
+    this->declare_parameter<double>("w_acc", 10.0);
+    this->declare_parameter<double>("opt_vmax", 1.8);
+    this->declare_parameter<double>("opt_amax", 1.5);
 
     this->get_parameter("enable_downstairs", enable_downstaris);
     this->get_parameter("obstacle_expand_radius", obstacle_expand_radius);
@@ -127,6 +141,19 @@ public:
     this->get_parameter("jps_amax", jps_amax_);
     this->get_parameter("jps_dt", jps_dt_);
     this->get_parameter("jps_sample_ds", jps_sample_ds_);
+    this->get_parameter("use_minco_backend", use_minco_backend_);
+    this->get_parameter("opt_ctrl_pt_interval", minco_param_.ctrl_pt_interval);
+    this->get_parameter("opt_sample_dt", minco_param_.sample_dt);
+    this->get_parameter("opt_max_iter", minco_param_.max_iter);
+    this->get_parameter("opt_max_time_ms", minco_param_.max_time_ms);
+    this->get_parameter("esdf_grad_radius", minco_param_.esdf_grad_radius);
+    this->get_parameter("w_energy", minco_param_.w_energy);
+    this->get_parameter("w_collision", minco_param_.w_collision);
+    this->get_parameter("w_vel", minco_param_.w_vel);
+    this->get_parameter("w_acc", minco_param_.w_acc);
+    this->get_parameter("opt_vmax", minco_param_.vmax);
+    this->get_parameter("opt_amax", minco_param_.amax);
+    minco_optimizer_.setParam(minco_param_);
 
     RCLCPP_INFO(this->get_logger(), "[Params] [enable_downstairs] : %s", enable_downstaris ? "true" : "false");
     RCLCPP_INFO(this->get_logger(), "[Params] [obstacle_expand_radius] : %f", obstacle_expand_radius);
@@ -156,6 +183,12 @@ public:
     RCLCPP_INFO(this->get_logger(), "[Params] [goal_escape_search_radius] : %f", goal_escape_search_radius_);
     RCLCPP_INFO(this->get_logger(), "[Params] [goal_escape_clearance_tolerance] : %f", goal_escape_clearance_tolerance_);
     RCLCPP_INFO(this->get_logger(), "[Params] [use_jps_frontend] : %s", use_jps_frontend_ ? "true" : "false");
+    RCLCPP_INFO(this->get_logger(), "[Params] [use_minco_backend] : %s", use_minco_backend_ ? "true" : "false");
+    RCLCPP_INFO(this->get_logger(), "[Params] [opt_ctrl_pt_interval] : %f [opt_sample_dt] : %f [opt_max_iter] : %d [opt_max_time_ms] : %f",
+                minco_param_.ctrl_pt_interval, minco_param_.sample_dt, minco_param_.max_iter, minco_param_.max_time_ms);
+    RCLCPP_INFO(this->get_logger(), "[Params] [esdf_grad_radius] : %f [w_energy/w_coll/w_vel/w_acc] : %f/%f/%f/%f [opt_vmax/amax] : %f/%f",
+                minco_param_.esdf_grad_radius, minco_param_.w_energy, minco_param_.w_collision,
+                minco_param_.w_vel, minco_param_.w_acc, minco_param_.vmax, minco_param_.amax);
 
     // map_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
     //   "/map", 1, std::bind(&PlanManager::map_callback, this, std::placeholders::_1));
@@ -263,6 +296,17 @@ private:
   double jps_amax_{1.5};
   double jps_dt_{0.1};
   double jps_sample_ds_{0.05};
+  // [MINCO_V1] MINCO backend (第三步)
+  bool use_minco_backend_{false};
+  navi_planner::TrajOptParam minco_param_;
+  navi_planner::TrajOptimizer minco_optimizer_;
+  minco::Trajectory<5> last_minco_traj_;  // 缓存，第四步重规划状态机复用（最近投影+轨迹拼接）
+  bool has_minco_traj_{false};
+  // 起点速度估计（TF 位姿差分，重规划时提供 MINCO 起点速度，保证连续性）
+  Eigen::Vector2d robot_vel_{0.0, 0.0};
+  Eigen::Vector2d prev_start_pose_{0.0, 0.0};
+  rclcpp::Time prev_start_stamp_;
+  bool has_prev_start_{false};
   std::vector<Eigen::Vector2i> dynamic_cells_from_pointcloud_;
   std::vector<Eigen::Vector2i> dynamic_cells_from_costmap_;
   std::vector<Eigen::Vector2i> dynamic_cells_from_blocked_memory_;
@@ -1305,6 +1349,7 @@ private:
     RCLCPP_INFO(this->get_logger(), "ESDF map initialized");
     planner_1.setEnvironment(esdf_1);
     jps_planner_.setEnvironment(esdf_1);
+    minco_optimizer_.setEnvironment(esdf_1);
     const double min_clearance_cells = requiredClearanceMeters() / resolution;
     planner_1.setParam(
       obstacle_cost_weight,
@@ -1374,6 +1419,50 @@ private:
       }
     }
     return false;
+  }
+
+  // [MINCO_V1] MINCO 轨迹优化分支（第三步）：
+  // JPS 拐点 -> 中间控制点（约 opt_ctrl_pt_interval 间距）+ 段时间初值（梯形时间分配）
+  // 起点速度用当前里程计估计值（重规划连续性），终点静止。
+  // 成功 -> 轨迹 5cm 弧长采样发 /sPath；失败 -> 返回 false，调用方回退第二步折线。
+  bool planMinco(const Eigen::Vector2d &start_pos,
+                 const Eigen::Vector2d &goal_pos,
+                 const std::vector<Eigen::Vector2d> &corners,
+                 std::vector<Eigen::Vector2d> &out_path)
+  {
+    has_minco_traj_ = false;
+
+    Eigen::Matrix2Xd q;
+    Eigen::VectorXd T;
+    if (!navi_planner::buildMincoInitialGuess(
+          corners, minco_param_.ctrl_pt_interval,
+          jps_time_k1_, jps_time_k2_, jps_vmax_, jps_amax_, q, T))
+    {
+      return false;
+    }
+
+    // ---- 端点 PVA ----
+    Eigen::Matrix<double, 2, 3> head_pva, tail_pva;
+    head_pva.col(0) = start_pos;
+    head_pva.col(1) = robot_vel_;
+    head_pva.col(2) = Eigen::Vector2d::Zero();
+    tail_pva.col(0) = goal_pos;
+    tail_pva.col(1) = Eigen::Vector2d::Zero();
+    tail_pva.col(2) = Eigen::Vector2d::Zero();
+
+    minco::Trajectory<5> traj;
+    if (!minco_optimizer_.optimize(head_pva, tail_pva, q, T, traj))
+    {
+      return false;
+    }
+
+    out_path = navi_planner::sampleTrajectoryByArc(traj, jps_sample_ds_);
+    if (out_path.size() < 2) return false;
+    out_path.front() = start_pos;
+    out_path.back() = goal_pos;
+    last_minco_traj_ = traj;
+    has_minco_traj_ = true;
+    return true;
   }
 
   void plan(Eigen::Vector2d start_, Eigen::Vector2d goal_)
@@ -1451,27 +1540,56 @@ private:
       double duration_millsecond = std::chrono::duration<double, std::milli>(endTime - beforeTime).count();
       std::cout << "JPS searching cost: " << duration_millsecond << "ms" << std::endl;
 
-      // 时间分配（思路一：梯形加减速）+ 等弧长密采样发 /sPath
-      beforeTime = std::chrono::steady_clock::now();
-      auto timed = navi_planner::allocateTimeTrapezoid(
-        Path_2d, jps_time_k1_, jps_time_k2_, jps_vmax_, jps_amax_, jps_dt_);
-      std::vector<Eigen::Vector2d> timed_pos;
-      timed_pos.reserve(timed.size());
-      for (const auto &tp : timed) timed_pos.push_back(tp.pos);
-      Path_2d = navi_planner::resampleByArcLength(timed_pos, jps_sample_ds_);
-      if (Path_2d.empty())
+      // ===================== [MINCO_V1] MINCO 后端（第三步），失败回退第二步折线 =====================
+      std::vector<Eigen::Vector2d> minco_path;
+      bool minco_ok = false;
+      if (use_minco_backend_)
       {
-        RCLCPP_WARN(this->get_logger(), "[JPS] resampled path empty, fallback to timed waypoints");
-        Path_2d = timed_pos;
+        beforeTime = std::chrono::steady_clock::now();
+        minco_ok = planMinco(start_, planning_goal, Path_2d, minco_path);
+        endTime = std::chrono::steady_clock::now();
+        duration_millsecond = std::chrono::duration<double, std::milli>(endTime - beforeTime).count();
+        if (minco_ok)
+        {
+          std::cout << "MINCO optimize cost: " << duration_millsecond
+                    << "ms (optimizer " << minco_optimizer_.lastDurationMs()
+                    << "ms, iters=" << minco_optimizer_.lastIterations()
+                    << ", ret=" << minco_optimizer_.lastReturnCode()
+                    << ", cost=" << minco_optimizer_.lastCost() << ")" << std::endl;
+          Path_2d = std::move(minco_path);
+          Path_2d.front() = start_;
+          Path_2d.back() = planning_goal;
+        }
+        else
+        {
+          RCLCPP_WARN(this->get_logger(), "[MINCO] optimize failed, fallback to JPS polyline path");
+        }
       }
-      if (!Path_2d.empty())
+
+      if (!minco_ok)
       {
-        Path_2d.front() = start_;
-        Path_2d.back() = planning_goal;
+        // 时间分配（思路一：梯形加减速）+ 等弧长密采样发 /sPath（第二步原逻辑）
+        beforeTime = std::chrono::steady_clock::now();
+        auto timed = navi_planner::allocateTimeTrapezoid(
+          Path_2d, jps_time_k1_, jps_time_k2_, jps_vmax_, jps_amax_, jps_dt_);
+        std::vector<Eigen::Vector2d> timed_pos;
+        timed_pos.reserve(timed.size());
+        for (const auto &tp : timed) timed_pos.push_back(tp.pos);
+        Path_2d = navi_planner::resampleByArcLength(timed_pos, jps_sample_ds_);
+        if (Path_2d.empty())
+        {
+          RCLCPP_WARN(this->get_logger(), "[JPS] resampled path empty, fallback to timed waypoints");
+          Path_2d = timed_pos;
+        }
+        if (!Path_2d.empty())
+        {
+          Path_2d.front() = start_;
+          Path_2d.back() = planning_goal;
+        }
+        endTime = std::chrono::steady_clock::now();
+        duration_millsecond = std::chrono::duration<double, std::milli>(endTime - beforeTime).count();
+        std::cout << "JPS time-alloc + resample cost: " << duration_millsecond << "ms" << std::endl;
       }
-      endTime = std::chrono::steady_clock::now();
-      duration_millsecond = std::chrono::duration<double, std::milli>(endTime - beforeTime).count();
-      std::cout << "JPS time-alloc + resample cost: " << duration_millsecond << "ms" << std::endl;
     }
     else
     {
@@ -1585,6 +1703,30 @@ private:
     Path_pub(Path_2d);
   }
 
+  // [MINCO_V1] TF 位姿差分估计地图系速度（供 MINCO 起点速度，重规划连续性）
+  void updateRobotVelocityEstimate()
+  {
+    const rclcpp::Time now_time = this->now();
+    if (has_prev_start_)
+    {
+      const double dt = (now_time - prev_start_stamp_).seconds();
+      if (dt > 0.02 && dt < 1.0)
+      {
+        Eigen::Vector2d v = (start - prev_start_pose_) / dt;
+        const double vlimit = std::max(minco_param_.vmax, jps_vmax_);
+        if (v.norm() > vlimit) v = v.normalized() * vlimit;
+        robot_vel_ = v;
+      }
+      else if (dt >= 1.0)
+      {
+        robot_vel_ = Eigen::Vector2d::Zero();
+      }
+    }
+    prev_start_pose_ = start;
+    prev_start_stamp_ = now_time;
+    has_prev_start_ = true;
+  }
+
   bool getStart(bool verbose = true)
   {
     std::ostringstream tried_frames;
@@ -1600,6 +1742,7 @@ private:
       double pose_x = robot_global_pose.transform.translation.x;
       double pose_y = robot_global_pose.transform.translation.y;
       start = Eigen::Vector2d(pose_x, pose_y);
+      updateRobotVelocityEstimate();
       if (verbose)
       {
         RCLCPP_INFO(
@@ -1634,6 +1777,7 @@ private:
         Eigen::Isometry3d T_anchor_robot = tf2::transformToEigen(anchor_to_robot.transform);
         Eigen::Isometry3d T_map_robot = T_map_anchor * T_anchor_robot;
         start = T_map_robot.translation().head<2>();
+        updateRobotVelocityEstimate();
         if (verbose)
         {
           RCLCPP_INFO(

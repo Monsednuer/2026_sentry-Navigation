@@ -59,6 +59,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   src/esdf_map.cpp
   src/jps.cpp
   src/smoother.cpp
+  src/traj_optimizer.cpp
 )
 ament_target_dependencies(${PROJECT_NAME}_lib
   rclcpp nav_msgs map_msgs geometry_msgs sensor_msgs tf2_ros tf2_eigen tf2_geometry_msgs
@@ -78,6 +79,11 @@ add_executable(esdf_benchmark src/benchmark_esdf.cpp)
 target_link_libraries(esdf_benchmark ${PROJECT_NAME}_lib)
 ament_target_dependencies(esdf_benchmark Eigen3 OpenCV)
 
+# MINCO backend unit test (第三步验收：过控制点/连续性/梯度数值微分)
+add_executable(test_minco src/test_minco.cpp)
+target_link_libraries(test_minco ${PROJECT_NAME}_lib)
+ament_target_dependencies(test_minco Eigen3 OpenCV)
+
 # ---------- 包含目录 ----------
 target_include_directories(${PROJECT_NAME}_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -85,7 +91,7 @@ target_include_directories(${PROJECT_NAME}_lib PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 # ---------- 安装 ----------
-install(TARGETS plan_manager esdf_benchmark ${PROJECT_NAME}_lib
+install(TARGETS plan_manager esdf_benchmark test_minco ${PROJECT_NAME}_lib
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}

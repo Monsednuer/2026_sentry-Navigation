@@ -95,3 +95,24 @@
     jps_amax: 1.5
     jps_dt: 0.1
     jps_sample_ds: 0.05
+
+    # ===================== [H] MINCO 后端（第三步，报告5.5.3 思路二） =====================
+    # 灰度开关：true=JPS+MINCO轨迹优化（需 use_jps_frontend: true），false=第二步行为
+    use_minco_backend: false
+    # 控制点平均间距（m），由 JPS 折线弧长按此间距生成中间控制点初值
+    opt_ctrl_pt_interval: 0.4
+    # cost 采样时间步（s），每段按时长均分采样点数
+    opt_sample_dt: 0.05
+    # L-BFGS 最大迭代轮次
+    opt_max_iter: 200
+    # 优化 wall clock 硬上限（ms），超时即取当前最优解
+    opt_max_time_ms: 80.0
+    # 避障梯度介入距离 d_safe（m），ESDF 距离小于该值时产生三次避障代价
+    esdf_grad_radius: 0.6
+    w_energy: 1.0
+    w_collision: 500.0
+    w_vel: 10.0
+    w_acc: 10.0
+    # 速度/加速度软限（与 jps_vmax / MPC MaxLinear 对齐）
+    opt_vmax: 1.8
+    opt_amax: 1.5
