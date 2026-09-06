@@ -19,3 +19,10 @@ script/fastlio_map_20260320_192814_180s.pcd
 script/.vscode/browse.vc.db
 src/path_searching/.vscode/browse.vc.db
 src/vel_forwarder/.vscode/browse.vc.db
+
+# ===== 本地文档与参考资料（仅保留本地，不上传 GitHub）=====
+/*.md
+!README.md
+/*.pdf
+docs/
+src/mpc_follower/src/1.md
