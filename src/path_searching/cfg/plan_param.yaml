@@ -128,3 +128,10 @@
     fine_grad_threshold: 0.5     # 势谷判定阈值（可移动性探测梯度）
     fine_probe_step: 0.1         # 可移动性探测步长（m）
     fine_scale: 0.6              # 势谷 viola 尺度
+
+    # ===================== [F.2] 重规划状态机（第五步，报告5.5.4.4） =====================
+    # 仅 use_jps_frontend+use_minco_backend 同时开启时生效；A* 模式走 [F] 旧逻辑
+    replan_check_period: 0.1        # worker 状态机 tick 周期（s，报告"规划定时器回调"）
+    partial_replan_lookback: 0.3    # 部分重规划投影点回退保留时长（s，报告"往回找一段时间"）
+    traj_deviation_threshold: 0.5   # 定位偏离轨迹阈值（m，报告"定位严重偏离轨迹"）
+    optimize_only_period: 1.0       # 静态场景仅优化刷新周期（s，报告未提及，工程定义）

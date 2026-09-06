@@ -30,6 +30,14 @@
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <std_msgs/msg/bool.hpp>
 
+// [MINCO_V3] 第五步：重规划状态机 + 规划异步化 worker（报告5.5.4.4；仅 FSM 模式启用）
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <vector>
+#include "replan_fsm.hpp"
+
 class PlanManager : public rclcpp::Node
 {
 public:
@@ -37,6 +45,7 @@ public:
   : Node("navi_planner"),
     map_geted(false),
     esdf_1(new ESDF_enviroment::esdf),
+    esdf_worker_(new ESDF_enviroment::esdf),
     planner_1(),
     smoother_1()
   {  
@@ -107,6 +116,11 @@ public:
     this->declare_parameter<double>("fine_grad_threshold", 0.5);
     this->declare_parameter<double>("fine_probe_step", 0.1);
     this->declare_parameter<double>("fine_scale", 0.6);
+    // [MINCO_V3] [F.2] 重规划状态机参数（规格 [F.2]，仅 FSM 模式使用）
+    this->declare_parameter<double>("replan_check_period", 0.1);
+    this->declare_parameter<double>("partial_replan_lookback", 0.3);
+    this->declare_parameter<double>("traj_deviation_threshold", 0.5);
+    this->declare_parameter<double>("optimize_only_period", 1.0);
 
     this->get_parameter("enable_downstairs", enable_downstaris);
     this->get_parameter("obstacle_expand_radius", obstacle_expand_radius);
@@ -175,6 +189,18 @@ public:
     this->get_parameter("fine_grad_threshold", minco_param_.fine_grad_threshold);
     this->get_parameter("fine_probe_step", minco_param_.fine_probe_step);
     this->get_parameter("fine_scale", minco_param_.fine_scale);
+    // [MINCO_V3] [F.2] 重规划状态机参数读取 + 模式判定
+    this->get_parameter("replan_check_period", replan_check_period_);
+    this->get_parameter("partial_replan_lookback", partial_replan_lookback_);
+    this->get_parameter("traj_deviation_threshold", traj_deviation_threshold_);
+    this->get_parameter("optimize_only_period", optimize_only_period_);
+    use_replan_fsm_ = use_jps_frontend_ && use_minco_backend_;
+    RCLCPP_INFO(
+      this->get_logger(),
+      "[MINCO_V3] replan state machine: %s (use_jps_frontend=%s use_minco_backend=%s)",
+      use_replan_fsm_ ? "ENABLED" : "DISABLED",
+      use_jps_frontend_ ? "true" : "false",
+      use_minco_backend_ ? "true" : "false");
     minco_optimizer_.setParam(minco_param_);
 
     RCLCPP_INFO(this->get_logger(), "[Params] [enable_downstairs] : %s", enable_downstaris ? "true" : "false");
@@ -254,6 +280,31 @@ public:
     stall_anchor_time_ = this->now();
     stall_anchor_pose_ = Eigen::Vector2d::Zero();
     stall_anchor_initialized_ = false;
+
+    // [MINCO_V3] 启动异步规划 worker（仅 FSM 模式；A* 模式 use_replan_fsm_=false 不启动）
+    if (use_replan_fsm_)
+    {
+      running_ = true;
+      map_ready_ = false;
+      worker_ = std::thread(&PlanManager::workerLoop, this);
+      RCLCPP_INFO(this->get_logger(), "[MINCO_V3] replan worker thread started");
+    }
+  }
+
+  ~PlanManager()
+  {
+    // [MINCO_V3] 先停 worker 再析构成员（析构顺序：~PlanManager() 体先执行，随后成员逆序析构。
+    // worker 线程体在构造期已启动，若不在本函数 join，成员（mutex/cv/esdf 等）销毁时线程仍在运行）。
+    if (worker_.joinable())
+    {
+      {
+        std::lock_guard<std::mutex> lk(state_mutex_);
+        running_ = false;
+      }
+      cv_.notify_all();
+      worker_.join();
+      RCLCPP_INFO(this->get_logger(), "[MINCO_V3] replan worker thread joined");
+    }
   }
 
 private:
@@ -262,6 +313,8 @@ private:
   Eigen::Vector2d map_offset;
   double resolution;
   ESDF_enviroment::Ptr esdf_1;
+  // [MINCO_V3] worker 专用 ESDF 实例（FSM 模式：JPS/MINCO 绑定此实例，动态障碍由 worker 更新）
+  ESDF_enviroment::Ptr esdf_worker_;
   navi_planner::Astar planner_1;
   navi_planner::smoother smoother_1;
   navi_planner::JPS jps_planner_;
@@ -342,6 +395,45 @@ private:
   rclcpp::Time stall_anchor_time_;
   Eigen::Vector2d stall_anchor_pose_;
   bool stall_anchor_initialized_{false};
+
+  // ===================== [MINCO_V3] 第五步：重规划状态机（报告5.5.4.4） =====================
+  // 判定：use_replan_fsm_ = use_jps_frontend_ && use_minco_backend_（构造期算定）
+  bool use_replan_fsm_{false};
+  // [F.2] 重规划状态机参数（默认值与 plan_param.yaml [F.2] 一致）
+  double replan_check_period_{0.1};        // worker tick 周期（s）
+  double partial_replan_lookback_{0.3};    // PARTIAL 投影回退保留时长（s）
+  double traj_deviation_threshold_{0.5};   // 定位偏离轨迹阈值（m）
+  double optimize_only_period_{1.0};       // 静态场景仅优化刷新周期（s）
+  // worker 基础设施
+  std::thread worker_;
+  std::mutex state_mutex_;
+  std::condition_variable cv_;
+  std::atomic<bool> running_{false};   // worker 主循环运行标志（析构置 false + notify + join）
+  bool map_ready_{false};
+  bool wake_pending_{false};           // 即时唤醒标志（新 goal / 障碍变化 notify 时置位，worker tick 清零）
+  // goal 共享状态（goal_callback 回调线程写，worker 读；state_mutex_ 保护）
+  uint64_t goal_seq_{0};                   // 目标编号（每次新目标 +1）
+  Eigen::Vector2d goal_shared_{0.0, 0.0};  // 最新目标位置（goal_callback 写，worker 读）
+  bool has_goal_shared_{false};            // 是否已有有效目标
+  uint64_t planned_goal_seq_{0};           // 已规划进当前轨迹的目标编号（仅 worker 访问）
+  std::vector<Eigen::Vector2i> merged_dynamic_cells_;  // 合并动态障碍快照（供 worker 应用）
+  bool dirty_{false};                      // 合并动态障碍集自上次成功规划以来变化
+  std::vector<Eigen::Vector2i> last_applied_dynamic_cells_;  // 已 apply 到 esdf_worker_ 的集合
+  // worker 侧快照（仅 worker 线程访问，无需锁）
+  Eigen::Vector2d goal_snap_{0.0, 0.0};
+  bool has_goal_snap_{false};
+  uint64_t goal_seq_snap_{0};
+  bool dirty_snap_{false};
+  std::vector<Eigen::Vector2i> merged_snap_;
+  // [MINCO_V3] worker 私有规划状态（仅 worker 线程访问；A* 模式下由 executor 单线程访问，模式互斥）
+  rclcpp::Time worker_last_replan_time_;       // worker 侧节流时间戳（FSM 模式专用）
+  rclcpp::Time worker_last_optimize_time_;     // 上次 OPTIMIZE_ONLY 成功时刻
+  bool worker_time_init_{false};               // 节流时间戳是否已初始化
+  Eigen::Vector2d worker_stall_anchor_pose_{Eigen::Vector2d::Zero()};  // worker 私有停滞锚点
+  rclcpp::Time worker_stall_anchor_time_;
+  bool worker_stall_initialized_{false};
+  uint64_t attempted_goal_seq_{0};           // 已尝试过执行的目标编号（用于节流绕过：新目标立即执行一次）
+  std::vector<Eigen::Vector2i> last_planned_dynamic_cells_;  // 上次成功规划所用的障碍集（dirty 内容级去重）
 
   //TODO
   rclcpp::TimerBase::SharedPtr timer_;
@@ -457,6 +549,29 @@ private:
     merged.insert(merged.end(), dynamic_cells_from_blocked_memory_.begin(), dynamic_cells_from_blocked_memory_.end());
 
     esdf_1->setDynamicObstacles(merged);
+  }
+
+  // [MINCO_V3] FSM 模式：把合并动态障碍集快照发布给 worker（短锁 + dirty + notify）。
+  // 不调用 esdf_1->setDynamicObstacles（FSM 模式下 esdf_1 无消费者，省一次 ~2ms 重建）；
+  // worker 在自己的线程里把快照同步进 esdf_worker_（§2.1 双实例，无锁竞争）。
+  void publishMergedDynamicObstaclesSnapshot()
+  {
+    std::vector<Eigen::Vector2i> merged;
+    merged.reserve(
+      dynamic_cells_from_pointcloud_.size() +
+      dynamic_cells_from_costmap_.size() +
+      dynamic_cells_from_blocked_memory_.size());
+    merged.insert(merged.end(), dynamic_cells_from_pointcloud_.begin(), dynamic_cells_from_pointcloud_.end());
+    merged.insert(merged.end(), dynamic_cells_from_costmap_.begin(), dynamic_cells_from_costmap_.end());
+    merged.insert(merged.end(), dynamic_cells_from_blocked_memory_.begin(), dynamic_cells_from_blocked_memory_.end());
+
+    {
+      std::lock_guard<std::mutex> lk(state_mutex_);
+      merged_dynamic_cells_ = std::move(merged);
+      dirty_ = true;
+      wake_pending_ = true;
+    }
+    cv_.notify_all();
   }
 
   // nav2 costmap may encode costs as 0..254 in int8[] (254 becomes -2).
@@ -630,6 +745,13 @@ private:
     }
 
     rebuildCostmapCellsFromKeySet();
+    // [MINCO_V3] FSM 模式（§2.5#6）：障碍格并入合并快照交给 worker（同步进 esdf_worker_ 后
+    // JPS/MINCO/干涉检测都能看到），executor 不做 esdf_1 重建、不跑内联检测/截断/触发。
+    if (use_replan_fsm_)
+    {
+      publishMergedDynamicObstaclesSnapshot();
+      return;
+    }
     applyMergedDynamicObstacles();
     const size_t merged_cells =
       dynamic_cells_from_costmap_.size() +
@@ -1364,25 +1486,51 @@ private:
     }
     
     esdf_1->esdf_init(bin_map_, map->info.height, map->info.width, map_offset, enable_downstaris);
+    // [MINCO_V3] worker 使用独立 ESDF 实例：同一份静态地图，动态障碍由 worker 单独 apply，
+    // 避免与 A* 侧 esdf_1 的 setDynamicObstacles 产生竞争。（delete[] 前双实例 esdf_init）
+    if (use_replan_fsm_)
+    {
+      esdf_worker_->esdf_init(bin_map_, map->info.height, map->info.width, map_offset, enable_downstaris);
+    }
     
     // [修复]: 防止内存泄漏，初始化ESDF后释放临时分配的内存
     delete[] bin_map_; 
     
     RCLCPP_INFO(this->get_logger(), "ESDF map initialized");
-    planner_1.setEnvironment(esdf_1);
-    jps_planner_.setEnvironment(esdf_1);
-    minco_optimizer_.setEnvironment(esdf_1);
-    const double min_clearance_cells = requiredClearanceMeters() / resolution;
-    planner_1.setParam(
-      obstacle_cost_weight,
-      dynamic_penalty_weight,
-      min_clearance_cells,
-      enable_start_escape_mode_,
-      start_escape_steps_);
-    planner_1.init();
-    smoother_1.smoother_setEnvironment(esdf_1);
+    // [MINCO_V3] 按模式绑定规划器环境：
+    //   A* 模式（默认）：与 93100a3 完全一致，全部绑定 esdf_1；
+    //   FSM 模式：worker 的 JPS/MINCO 绑定 esdf_worker_（A* 侧 planner/smoother 在 FSM 不启用）
+    if (use_replan_fsm_)
+    {
+      jps_planner_.setEnvironment(esdf_worker_);
+      minco_optimizer_.setEnvironment(esdf_worker_);
+    }
+    else
+    {
+      planner_1.setEnvironment(esdf_1);
+      jps_planner_.setEnvironment(esdf_1);
+      minco_optimizer_.setEnvironment(esdf_1);
+      const double min_clearance_cells = requiredClearanceMeters() / resolution;
+      planner_1.setParam(
+        obstacle_cost_weight,
+        dynamic_penalty_weight,
+        min_clearance_cells,
+        enable_start_escape_mode_,
+        start_escape_steps_);
+      planner_1.init();
+      smoother_1.smoother_setEnvironment(esdf_1);
+    }
     
     map_geted = true;
+    if (use_replan_fsm_)
+    {
+      // [MINCO_V3] map 就绪握手：esdf_worker_ 已初始化完毕，唤醒 worker
+      {
+        std::lock_guard<std::mutex> lk(state_mutex_);
+        map_ready_ = true;
+      }
+      cv_.notify_all();
+    }
   }
 
   void logNoPathDiagnostics(
@@ -1865,6 +2013,29 @@ private:
       goal[0],
       goal[1]);
 
+    // [MINCO_V3] FSM 模式（§2.5#5）：回调只存目标 + 自增版本 + 唤醒 worker，不在 executor 线程规划
+    //（旧版此处直接 getStart()+plan() 阻塞回调线程 ~200ms）。A* 模式走下面原逻辑，与 93100a3 一致。
+    if (use_replan_fsm_)
+    {
+      const double dist_to_last_fsm = (goal_pt - last_goal_).norm();
+      if (is_first_goal_ || dist_to_last_fsm > 0.05)
+      {
+        last_goal_ = goal_pt;
+        is_first_goal_ = false;
+        {
+          std::lock_guard<std::mutex> lk(state_mutex_);
+          goal_shared_ = goal_pt;
+          has_goal_shared_ = true;
+          ++goal_seq_;
+          wake_pending_ = true;
+        }
+        cv_.notify_all();
+        RCLCPP_INFO(this->get_logger(), "[MINCO_V3] new goal queued (seq=%llu): (%.3f, %.3f)",
+                    (unsigned long long)goal_seq_, goal_pt[0], goal_pt[1]);
+      }
+      return;
+    }
+
     double dist_to_last_goal = (goal_pt - last_goal_).norm();
     //TODO
     if (is_first_goal_ || dist_to_last_goal > 0.05) 
@@ -2007,6 +2178,12 @@ private:
 
   void timer_callback()
   {
+    // [MINCO_V3] FSM 模式（§2.5#7）：monitor/阻塞记忆清理/通行检测/截断/触发全部迁到 worker
+    // 自主 tick（workerLoop），executor 定时器空转返回；blocked zone 在 FSM 模式无生产者，跳过。
+    if (use_replan_fsm_)
+    {
+      return;
+    }
     if (map_geted && pruneExpiredBlockedMemoryCells())
     {
       applyMergedDynamicObstacles();
@@ -2106,6 +2283,12 @@ private:
 
     // [DYN_GRID_REPLAN_V1] keep pointcloud source local, then merge with other dynamic sources
     dynamic_cells_from_pointcloud_.swap(dynamic_cells);
+    // [MINCO_V3] FSM 模式（§2.5#6）：只发布合并快照，检测/截断/触发由 worker 自主 tick 承担
+    if (use_replan_fsm_)
+    {
+      publishMergedDynamicObstaclesSnapshot();
+      return;
+    }
     applyMergedDynamicObstacles();
 
     if (!has_goal_)
@@ -2136,6 +2319,455 @@ private:
       // [DYN_GRID_REPLAN_V1] collision trigger from pointcloud obstacle update
       truncatePathOnBlockingObstacle("pointcloud collision");
       triggerReplan("pointcloud collision");
+    }
+  }
+
+  // ===================== [MINCO_V3] worker 函数族（第五步，仅 FSM 模式，worker 线程内执行） =====================
+
+  // 发布 reachable（worker 线程调用；rclcpp publish 线程安全）
+  void publishReachable(bool ok, const char *reason)
+  {
+    std_msgs::msg::Bool msg;
+    msg.data = ok;
+    reachable_pub_->publish(msg);
+    if (!ok)
+    {
+      RCLCPP_WARN(this->get_logger(), "[REPLAN] goal not reachable: %s", reason);
+    }
+  }
+
+  // 成功规划后清 dirty（下一次障碍变化会重新置位）
+  void clearDirty()
+  {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+    dirty_ = false;
+  }
+
+  // [MINCO_V3] §2.4 轨迹前向干涉检测：从 t_start 起按 0.05s 时间步采样，
+  // 覆盖前方 forward_check_distance_ 米弧长；任一点 ESDF < required_clearance 判干涉。
+  bool workerTrajectoryForwardCollision(const minco::Trajectory<5> &traj, double t_start)
+  {
+    if (traj.getPieceNum() == 0) return false;
+    const double T = traj.getTotalDuration();
+    const double required = requiredClearanceMeters();
+    double t = std::max(0.0, std::min(t_start, T));
+    Eigen::Vector2d prev = traj.getPos(t);
+    double arc = 0.0;
+    if (esdf_worker_->getDistQuadratic(prev) < required) return true;
+    while (t < T && arc < forward_check_distance_)
+    {
+      t = std::min(t + 0.05, T);
+      const Eigen::Vector2d p = traj.getPos(t);
+      arc += (p - prev).norm();
+      prev = p;
+      if (esdf_worker_->getDistQuadratic(p) < required) return true;
+      if (t >= T) break;
+    }
+    return false;
+  }
+
+  // [MINCO_V3] worker 版停滞检测（私有锚点；判据同 detectStall，报告无此项为工程补充）
+  bool workerDetectStall(const Eigen::Vector2d &start_pos, const Eigen::Vector2d &goal_pos)
+  {
+    if (!enable_stall_trigger_) return false;
+    if ((start_pos - goal_pos).norm() < stall_goal_distance_threshold_) return false;
+    const auto now = this->now();
+    if (!worker_stall_initialized_)
+    {
+      worker_stall_anchor_pose_ = start_pos;
+      worker_stall_anchor_time_ = now;
+      worker_stall_initialized_ = true;
+      return false;
+    }
+    if ((start_pos - worker_stall_anchor_pose_).norm() > stall_move_threshold_)
+    {
+      worker_stall_anchor_pose_ = start_pos;
+      worker_stall_anchor_time_ = now;
+      return false;
+    }
+    return (now - worker_stall_anchor_time_).seconds() >= stall_window_sec_;
+  }
+
+  // [MINCO_V3] worker 版：在 esdf_worker_ 上环形搜索最近自由栅格（不改 A* 版 findNearestFreeCell）
+  bool findNearestFreeCellWorker(const Eigen::Vector2i &idx, int max_radius, Eigen::Vector2i &out)
+  {
+    if (!esdf_worker_->checkCollision(idx)) { out = idx; return true; }
+    for (int r = 1; r <= max_radius; ++r)
+    {
+      for (int dr = -r; dr <= r; ++dr)
+      {
+        for (int dc = -r; dc <= r; ++dc)
+        {
+          if (std::max(std::abs(dr), std::abs(dc)) != r) continue;
+          Eigen::Vector2i cand(idx[0] + dr, idx[1] + dc);
+          if (cand[0] < 0 || cand[1] < 0 || cand[0] >= map_size[0] || cand[1] >= map_size[1]) continue;
+          if (!esdf_worker_->checkCollision(cand)) { out = cand; return true; }
+        }
+      }
+    }
+    return false;
+  }
+
+  // [MINCO_V3] 从种子（head PVA + 控制点/段时间初值）跑 MINCO 两阶段优化。
+  // 成功才替换 last_minco_traj_；失败不清除 has_minco_traj_（PARTIAL/OPT_ONLY 保留旧轨迹语义）。
+  bool runMincoFromSeed(const Eigen::Matrix<double, 2, 3> &head_pva,
+                        const Eigen::Vector2d &goal_pos,
+                        const Eigen::Matrix2Xd &q,
+                        const Eigen::VectorXd &T,
+                        std::vector<Eigen::Vector2d> &out_path)
+  {
+    Eigen::Matrix<double, 2, 3> tail_pva;
+    tail_pva.col(0) = goal_pos;
+    tail_pva.col(1) = Eigen::Vector2d::Zero();
+    tail_pva.col(2) = Eigen::Vector2d::Zero();
+
+    minco::Trajectory<5> traj;
+    if (!minco_optimizer_.optimize(head_pva, tail_pva, q, T, traj))
+    {
+      return false;
+    }
+    out_path = navi_planner::sampleTrajectoryByArc(traj, jps_sample_ds_);
+    if (out_path.size() < 2) return false;
+    out_path.front() = head_pva.col(0);
+    out_path.back() = goal_pos;
+    last_minco_traj_ = traj;
+    has_minco_traj_ = true;
+    // 统计日志（镜像 plan() 的 [MINCO_V1]/[MINCO_V2] 输出，冒烟脚本依赖）
+    std::cout << "MINCO optimize cost: (optimizer " << minco_optimizer_.lastDurationMs()
+              << "ms, iters=" << minco_optimizer_.lastIterations()
+              << ", ret=" << minco_optimizer_.lastReturnCode()
+              << ", cost=" << minco_optimizer_.lastCost() << ")" << std::endl;
+    if (minco_param_.two_stage)
+    {
+      std::cout << "MINCO PRE  stage: " << minco_optimizer_.lastMsPre()
+                << "ms, iters=" << minco_optimizer_.lastItersPre()
+                << ", ret=" << minco_optimizer_.lastRetPre() << std::endl;
+    }
+    return true;
+  }
+
+  // [MINCO_V3] 折线 fallback：time-alloc + 密采样（镜像 plan() 第二步原逻辑，不发空路径）
+  bool fallbackPolyline(const std::vector<Eigen::Vector2d> &corners,
+                        const Eigen::Vector2d &start_pos, const Eigen::Vector2d &goal_pos,
+                        std::vector<Eigen::Vector2d> &out_path)
+  {
+    auto timed = navi_planner::allocateTimeTrapezoid(
+      corners, jps_time_k1_, jps_time_k2_, jps_vmax_, jps_amax_, jps_dt_);
+    std::vector<Eigen::Vector2d> timed_pos;
+    timed_pos.reserve(timed.size());
+    for (const auto &tp : timed) timed_pos.push_back(tp.pos);
+    out_path = navi_planner::resampleByArcLength(timed_pos, jps_sample_ds_);
+    if (out_path.empty())
+    {
+      RCLCPP_WARN(this->get_logger(), "[REPLAN] resampled fallback path empty, use timed waypoints");
+      out_path = timed_pos;
+    }
+    if (!out_path.empty())
+    {
+      out_path.front() = start_pos;
+      out_path.back() = goal_pos;
+    }
+    return !out_path.empty();
+  }
+
+  // [MINCO_V3] FULL：完全重规划——JPS(当前位置→goal)+MINCO，镜像 plan() 的 JPS+MINCO 主体（读 esdf_worker_）。
+  // 已知差异：不跑 applyGoalEscapeIfNeeded（其读 costmap 键集为 executor 私有，跨线程竞争）；
+  // 目标不可达 → JPS 失败 → reachable=false 兜底（规格"已知缺陷"节）。
+  bool runFullReplan(const Eigen::Vector2d &start_pos, const Eigen::Vector2d &goal_pos)
+  {
+    const Eigen::Vector2i start_index = Pos2index(start_pos);
+    const Eigen::Vector2i end_index = Pos2index(goal_pos);
+    if (start_index[0] < 0 || start_index[0] >= map_size[0] ||
+        start_index[1] < 0 || start_index[1] >= map_size[1] ||
+        end_index[0] < 0 || end_index[0] >= map_size[0] ||
+        end_index[1] < 0 || end_index[1] >= map_size[1])
+    {
+      publishReachable(false, "input_out_of_map");
+      return false;
+    }
+
+    const auto tJps0 = std::chrono::steady_clock::now();
+    std::vector<Eigen::Vector2d> Path_2d;
+    bool jps_ok = jps_planner_.search(start_pos, goal_pos, Path_2d);
+    if (!jps_ok && enable_start_escape_mode_ && esdf_worker_->checkCollision(start_index))
+    {
+      Eigen::Vector2i free_idx;
+      if (findNearestFreeCellWorker(start_index, std::max(start_escape_steps_, 40), free_idx))
+      {
+        const Eigen::Vector2d escaped_start = Index2pos(free_idx);
+        jps_ok = jps_planner_.search(escaped_start, goal_pos, Path_2d);
+        if (jps_ok && !Path_2d.empty())
+        {
+          Path_2d.insert(Path_2d.begin(), start_pos);
+          RCLCPP_WARN(this->get_logger(),
+                      "[REPLAN][FULL] start occupied, escaped to cell (%d,%d)", free_idx[0], free_idx[1]);
+        }
+      }
+    }
+    if (!jps_ok)
+    {
+      publishReachable(false, "jps_no_path");
+      return false;  // 保留旧轨迹
+    }
+    publishReachable(true, "jps_ok");
+    std::cout << "JPS searching cost: "
+              << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tJps0).count()
+              << "ms" << std::endl;
+
+    // MINCO（复用第三步 planMinco：入口清缓存、成功写 last_minco_traj_；起点速度=当前速度估计）
+    std::vector<Eigen::Vector2d> out_path;
+    if (!planMinco(start_pos, goal_pos, Path_2d, out_path))
+    {
+      RCLCPP_WARN(this->get_logger(), "[MINCO] optimize failed, fallback to JPS polyline path");
+      if (!fallbackPolyline(Path_2d, start_pos, goal_pos, out_path))
+      {
+        return false;
+      }
+      has_minco_traj_ = false;  // 折线：下 tick 无投影基准 → 再 FULL（重试）
+    }
+    path_now = out_path;
+    Path_pub(path_now);
+    return true;
+  }
+
+  // [MINCO_V3] PARTIAL：投影点回退保留前缀 + 拼接 JPS 结果 + MINCO（报告 5.5.4.4 逐字机制）。
+  // 任一步失败 → 保留旧轨迹（has_minco_traj_ 不动，不发空路径）。
+  bool runPartialReplan(const Eigen::Vector2d &goal_pos, const navi_planner::TrajProjection &proj)
+  {
+    const navi_planner::PartialSeed seed = navi_planner::buildPartialSeed(
+      last_minco_traj_, proj.t, partial_replan_lookback_, minco_param_.ctrl_pt_interval);
+    if (!seed.valid)
+    {
+      return false;
+    }
+
+    std::vector<Eigen::Vector2d> jps_corners;
+    bool jps_ok = jps_planner_.search(seed.jps_start, goal_pos, jps_corners);
+    if (!jps_ok)
+    {
+      const Eigen::Vector2i jps_idx = Pos2index(seed.jps_start);
+      Eigen::Vector2i free_idx;
+      if (jps_idx[0] >= 0 && jps_idx[0] < map_size[0] &&
+          jps_idx[1] >= 0 && jps_idx[1] < map_size[1] &&
+          esdf_worker_->checkCollision(jps_idx) &&
+          findNearestFreeCellWorker(jps_idx, std::max(start_escape_steps_, 40), free_idx))
+      {
+        jps_ok = jps_planner_.search(Index2pos(free_idx), goal_pos, jps_corners);
+      }
+    }
+    if (!jps_ok || jps_corners.empty())
+    {
+      RCLCPP_WARN(this->get_logger(),
+                  "[REPLAN][PARTIAL] JPS failed from projection, keep old trajectory");
+      return false;
+    }
+
+    // 前缀拼接：t_keep 位置 + kept 采样点 + JPS 折线
+    std::vector<Eigen::Vector2d> corners;
+    corners.reserve(seed.kept_pts.size() + jps_corners.size() + 1);
+    corners.push_back(seed.head_pva.col(0));
+    corners.insert(corners.end(), seed.kept_pts.begin(), seed.kept_pts.end());
+    corners.insert(corners.end(), jps_corners.begin(), jps_corners.end());
+
+    Eigen::Matrix2Xd q;
+    Eigen::VectorXd T;
+    if (!navi_planner::buildMincoInitialGuess(corners, minco_param_.ctrl_pt_interval,
+                                              jps_time_k1_, jps_time_k2_, jps_vmax_, jps_amax_, q, T))
+    {
+      RCLCPP_WARN(this->get_logger(),
+                  "[REPLAN][PARTIAL] initial guess failed, keep old trajectory");
+      return false;
+    }
+    std::vector<Eigen::Vector2d> out_path;
+    if (!runMincoFromSeed(seed.head_pva, goal_pos, q, T, out_path))
+    {
+      RCLCPP_WARN(this->get_logger(),
+                  "[REPLAN][PARTIAL] MINCO failed, keep old trajectory");
+      return false;
+    }
+    path_now = out_path;
+    Path_pub(path_now);
+    return true;
+  }
+
+  // [MINCO_V3] OPTIMIZE_ONLY：不经过 JPS——旧轨迹从重映射位置起等时间隔重采样 + MINCO（报告右分支）。
+  bool runOptimizeOnlyReplan(const Eigen::Vector2d &goal_pos, const navi_planner::TrajProjection &proj)
+  {
+    const double t_start = std::max(0.0, proj.t - partial_replan_lookback_);
+    const navi_planner::OptimizeOnlySeed seed =
+      navi_planner::buildOptimizeOnlySeed(last_minco_traj_, t_start, minco_param_.ctrl_pt_interval);
+    if (!seed.valid)
+    {
+      return false;  // 剩余太短（接近终点）：跳过本 tick，旧轨迹继续被跟踪
+    }
+    std::vector<Eigen::Vector2d> out_path;
+    if (!runMincoFromSeed(seed.head_pva, goal_pos, seed.inner_pts, seed.durations, out_path))
+    {
+      RCLCPP_WARN(this->get_logger(),
+                  "[REPLAN][OPTIMIZE_ONLY] MINCO failed, keep old trajectory");
+      return false;
+    }
+    path_now = out_path;
+    Path_pub(path_now);
+    return true;
+  }
+
+  // [MINCO_V3] worker 单次 tick（规格 §2.0）：ESDF 同步→位姿→投影/干涉/停滞→模式选择→节流→执行→发布。
+  void workerTick()
+  {
+    // ---- 1. 动态障碍同步（仅集合变化时重建，worker 线程内，~2ms） ----
+    if (merged_snap_ != last_applied_dynamic_cells_)
+    {
+      esdf_worker_->setDynamicObstacles(merged_snap_);
+      last_applied_dynamic_cells_ = merged_snap_;
+    }
+
+    if (!has_goal_snap_)
+    {
+      worker_stall_initialized_ = false;
+      return;
+    }
+
+    // ---- 2. 位姿 + TF 差分速度（tf_buffer_ 线程安全；FSM 模式下成员 worker 独占） ----
+    if (!getStart(false))
+    {
+      return;  // TF 不可用：保留旧轨迹，下个 tick 重试
+    }
+    const Eigen::Vector2d &start_pos = start;
+
+    // ---- 3. 状态机输入（§2.2/§2.4） ----
+    navi_planner::ReplanInputs in;
+    in.has_goal = true;
+    in.near_goal = (start_pos - goal_snap_).norm() < stall_goal_distance_threshold_;
+    in.has_traj = has_minco_traj_;
+    in.goal_changed = (goal_seq_snap_ != planned_goal_seq_);
+    if (in.goal_changed)
+    {
+      worker_stall_initialized_ = false;  // 新目标重置停滞锚点（镜像 triggerReplan 语义）
+    }
+
+    navi_planner::TrajProjection proj;
+    proj.valid = false;
+    if (in.has_traj)
+    {
+      proj = navi_planner::projectOnTrajectory(last_minco_traj_, start_pos);
+      if (proj.valid)
+      {
+        in.deviation_exceeded = (start_pos - proj.pos).norm() > traj_deviation_threshold_;
+        in.traj_collision = workerTrajectoryForwardCollision(last_minco_traj_, proj.t);
+      }
+      else
+      {
+        in.deviation_exceeded = true;  // 投影失败 = 轨迹不可用 → FULL
+      }
+    }
+    in.stall = workerDetectStall(start_pos, goal_snap_);
+    in.dirty = (merged_snap_ != last_planned_dynamic_cells_);
+    const auto now = this->now();
+    in.optimize_due = !worker_time_init_ ||
+                      (now - worker_last_optimize_time_).seconds() >= optimize_only_period_;
+
+    navi_planner::ReplanMode mode = navi_planner::selectReplanMode(in);
+    if (!proj.valid && mode != navi_planner::ReplanMode::NONE &&
+        mode != navi_planner::ReplanMode::FULL)
+    {
+      mode = navi_planner::ReplanMode::FULL;  // 投影失效兜底（理论上不可达，防御）
+    }
+    if (mode == navi_planner::ReplanMode::NONE)
+    {
+      return;
+    }
+
+    // ---- 4. 节流（§2.2）：该 goal 版本首次尝试绕过节流立即执行 ----
+    // 注意不能再加 !has_traj 绕过：FULL 反复失败（无轨迹）时会导致 10Hz 重跑 JPS 打满 CPU；
+    // 新 goal 即时性已由 attempted_goal_seq_ 覆盖（首规划必然 attempted!=seq → 绕过）。
+    const bool bypass = (goal_seq_snap_ != attempted_goal_seq_);
+    if (!bypass && worker_time_init_ &&
+        (now - worker_last_replan_time_).seconds() < min_replan_interval_sec_)
+    {
+      return;
+    }
+
+    // ---- 5. 执行三策略（成功才发布 = MPC 永远跟最后一条有效轨迹） ----
+    const auto t0 = std::chrono::steady_clock::now();
+    bool ok = false;
+    const char *mode_str = "?";
+    switch (mode)
+    {
+      case navi_planner::ReplanMode::FULL:
+        mode_str = "FULL";
+        ok = runFullReplan(start_pos, goal_snap_);
+        break;
+      case navi_planner::ReplanMode::PARTIAL:
+        mode_str = "PARTIAL";
+        ok = runPartialReplan(goal_snap_, proj);
+        break;
+      case navi_planner::ReplanMode::OPTIMIZE_ONLY:
+        mode_str = "OPTIMIZE_ONLY";
+        ok = runOptimizeOnlyReplan(goal_snap_, proj);
+        break;
+      default:
+        return;
+    }
+    const double exec_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - t0).count();
+
+    // ---- 6. 收尾：时间戳 / 版本 / dirty 清理（§2.5#9） ----
+    const auto done = this->now();
+    worker_last_replan_time_ = done;
+    worker_time_init_ = true;
+    attempted_goal_seq_ = goal_seq_snap_;
+    if (ok)
+    {
+      planned_goal_seq_ = goal_seq_snap_;
+      worker_last_optimize_time_ = done;
+      last_planned_dynamic_cells_ = merged_snap_;
+      if (in.stall)
+      {
+        // 镜像 triggerReplan("stall",true)：成功重规划后重置停滞锚点，避免 8s 窗口反复触发 FULL
+        worker_stall_anchor_pose_ = start_pos;
+        worker_stall_anchor_time_ = done;
+      }
+      {
+        std::lock_guard<std::mutex> lk(state_mutex_);
+        if (merged_dynamic_cells_ == last_planned_dynamic_cells_)
+        {
+          dirty_ = false;  // clearDirtyIfUnchanged：执行期间无新障碍变化才清
+        }
+      }
+    }
+    RCLCPP_INFO(this->get_logger(),
+                "[REPLAN] mode=%s dev=%.2fm colli=%d dirty=%d stall=%d ok=%d iters=%d cost=%.4f ms=%.1f",
+                mode_str,
+                proj.valid ? (start_pos - proj.pos).norm() : -1.0,
+                in.traj_collision ? 1 : 0, in.dirty ? 1 : 0, in.stall ? 1 : 0, ok ? 1 : 0,
+                minco_optimizer_.lastIterations(), minco_optimizer_.lastCost(), exec_ms);
+  }
+
+  // [MINCO_V3] worker 主循环：cv 等待（超时=tick 周期；goal/map 握手 notify 提前唤醒）→短锁快照→tick。
+  void workerLoop()
+  {
+    while (running_.load())
+    {
+      {
+        std::unique_lock<std::mutex> lk(state_mutex_);
+        cv_.wait_for(lk, std::chrono::duration<double>(std::max(0.02, replan_check_period_)),
+                     [this] { return !running_.load() || wake_pending_; });
+        if (!running_.load())
+        {
+          return;
+        }
+        wake_pending_ = false;
+        if (!map_ready_)
+        {
+          continue;  // 静态底图未就绪：不触碰 esdf_worker_（§2.1 时序握手）
+        }
+        goal_snap_ = goal_shared_;
+        has_goal_snap_ = has_goal_shared_;
+        goal_seq_snap_ = goal_seq_;
+        merged_snap_ = merged_dynamic_cells_;  // 短锁内拷贝（µs 级）
+      }
+      workerTick();  // 重活在锁外
     }
   }
 };
