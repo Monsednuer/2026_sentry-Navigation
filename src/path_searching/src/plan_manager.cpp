@@ -96,6 +96,17 @@ public:
     this->declare_parameter<double>("w_acc", 10.0);
     this->declare_parameter<double>("opt_vmax", 1.8);
     this->declare_parameter<double>("opt_amax", 1.5);
+    // [MINCO_V2] 两阶段优化参数（第四步，报告5.5.4.2）
+    this->declare_parameter<bool>("two_stage_opt", true);
+    this->declare_parameter<int>("opt_max_iter_pre", 1000);
+    this->declare_parameter<int>("opt_max_iter_fine", 1000);
+    this->declare_parameter<double>("lbfgs_delta", 1.0e-3);
+    this->declare_parameter<double>("w_time_reg", 50.0);
+    this->declare_parameter<double>("time_reg_lower", 0.9);
+    this->declare_parameter<double>("time_reg_upper", 1.1);
+    this->declare_parameter<double>("fine_grad_threshold", 0.5);
+    this->declare_parameter<double>("fine_probe_step", 0.1);
+    this->declare_parameter<double>("fine_scale", 0.6);
 
     this->get_parameter("enable_downstairs", enable_downstaris);
     this->get_parameter("obstacle_expand_radius", obstacle_expand_radius);
@@ -153,6 +164,17 @@ public:
     this->get_parameter("w_acc", minco_param_.w_acc);
     this->get_parameter("opt_vmax", minco_param_.vmax);
     this->get_parameter("opt_amax", minco_param_.amax);
+    // [MINCO_V2] 两阶段优化参数读取（第四步，报告5.5.4.2）
+    this->get_parameter("two_stage_opt", minco_param_.two_stage);
+    this->get_parameter("opt_max_iter_pre", minco_param_.max_iter_pre);
+    this->get_parameter("opt_max_iter_fine", minco_param_.max_iter_fine);
+    this->get_parameter("lbfgs_delta", minco_param_.lbfgs_delta);
+    this->get_parameter("w_time_reg", minco_param_.w_time_reg);
+    this->get_parameter("time_reg_lower", minco_param_.time_reg_lower);
+    this->get_parameter("time_reg_upper", minco_param_.time_reg_upper);
+    this->get_parameter("fine_grad_threshold", minco_param_.fine_grad_threshold);
+    this->get_parameter("fine_probe_step", minco_param_.fine_probe_step);
+    this->get_parameter("fine_scale", minco_param_.fine_scale);
     minco_optimizer_.setParam(minco_param_);
 
     RCLCPP_INFO(this->get_logger(), "[Params] [enable_downstairs] : %s", enable_downstaris ? "true" : "false");
@@ -1556,6 +1578,13 @@ private:
                     << "ms, iters=" << minco_optimizer_.lastIterations()
                     << ", ret=" << minco_optimizer_.lastReturnCode()
                     << ", cost=" << minco_optimizer_.lastCost() << ")" << std::endl;
+          // [MINCO_V2] 两阶段模式：追加 PRE 阶段统计行（第四步，报告5.5.4.2）
+          if (minco_param_.two_stage)
+          {
+            std::cout << "MINCO PRE  stage: " << minco_optimizer_.lastMsPre()
+                      << "ms, iters=" << minco_optimizer_.lastItersPre()
+                      << ", ret=" << minco_optimizer_.lastRetPre() << std::endl;
+          }
           Path_2d = std::move(minco_path);
           Path_2d.front() = start_;
           Path_2d.back() = planning_goal;

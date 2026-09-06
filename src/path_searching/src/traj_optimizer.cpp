@@ -146,9 +146,53 @@ double TrajOptimizer::evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &g)
             const double d = queryDist(p);
             if (d < param_.esdf_grad_radius)
             {
-                const double r = param_.esdf_grad_radius - d;
-                cost += param_.w_collision * r * r * r;
-                gp += -3.0 * param_.w_collision * r * r * queryGrad(p);
+                const bool fine_stage =
+                    param_.two_stage && stage_ == OptStage::FINELY_OPTIMIZATION;
+                if (!fine_stage)
+                {
+                    // PRE / 单阶段：ESDF 原始梯度直接用（现状语义）
+                    const double r = param_.esdf_grad_radius - d;
+                    cost += param_.w_collision * r * r * r;
+                    gp += -3.0 * param_.w_collision * r * r * queryGrad(p);
+                }
+                else
+                {
+                    // [MINCO_V2] FINELY 阶段避障准梯度（报告5.5.4.2）：
+                    //   法向分解（去切向）+ 可移动性探测 + 势谷分支。
+                    //   准梯度非任何解析 cost 的精确梯度，L-BFGS 面向分段光滑设计可容纳。
+                    const double spd = v.norm();
+                    if (spd > 1e-6)
+                    {
+                        const Eigen::Vector2d vhat = v / spd;  // 运动切向单位向量
+                        const Eigen::Vector2d g_esdf = queryGrad(p);
+                        const Eigen::Vector2d gN = g_esdf - (g_esdf.dot(vhat)) * vhat;  // 法向梯度
+                        if (gN.norm() > 1e-9)
+                        {
+                            const Eigen::Vector2d ghat = gN / gN.norm();  // 单位化法向
+                            // 可移动性探测：沿法向探一步看距离场是否放开
+                            const double d_probe =
+                                queryDist(p + param_.fine_probe_step * ghat);
+                            const double g_probe = (d_probe - d) / param_.fine_probe_step;
+                            if (g_probe >= param_.fine_grad_threshold)
+                            {
+                                // 自由分支：cost 同 PRE 三次惩罚，方向为法向单位化（报告 "normalize"）
+                                const double r = param_.esdf_grad_radius - d;
+                                cost += param_.w_collision * r * r * r;
+                                gp += -3.0 * param_.w_collision * r * r * ghat;
+                            }
+                            else
+                            {
+                                // 势谷分支：viola = fine_scale*sqrt(||gN||)，继续推会优化到另一端
+                                const double viola =
+                                    param_.fine_scale * std::sqrt(gN.norm());
+                                cost += param_.w_collision * viola * viola * viola;
+                                gp += -3.0 * param_.w_collision * viola * viola * ghat;
+                            }
+                        }
+                        // ||gN|| <= 1e-9：门中线两侧梯度对消，跳过该点避障梯度
+                    }
+                    // ||v|| <= 1e-6：无法定义运动法向，跳过该点避障梯度
+                }
             }
 
             // 速度越限：P = (||v||^2 - vmax^2)^2
@@ -182,6 +226,42 @@ double TrajOptimizer::evaluate(const Eigen::VectorXd &x, Eigen::VectorXd &g)
     }
 
     cost += barrier_cost;
+
+    // [MINCO_V2] 时间正则（two_stage 模式下 PRE 与 FINELY 两阶段都生效；two_stage=false 不生效 = 第三步回归）：
+    //   绝对时间形式（报告5.5.4.2，与 DDR-opt 同构）：T̄ = (ΣTᵢ)/N 用 barrier 夹紧后的 T 计算；
+    //   超界段 eᵢ = Tᵢ − bound·T̄，∂c/∂Tⱼ = Σᵢ 2·w·eᵢ·(δᵢⱼ − boundᵢ/N)（T̄ 对所有 Tⱼ 有依赖，梯度稠密）。
+    //   经 T=exp(τ) 链式在下方统一乘 T。该项解析可微，纳入 PRE 阶段中心差分校验。
+    //   注：报告写"仅第一阶段需要"，但 FINELY 的能量项会把段时间重新拉歪（实测 V1 版 T-ratio 漂到 [0.62,1.50]，
+    //   集成场景 [0.71,3.50]）——DDR-opt 原码也是两阶段都施加 mean-time 正则（optimizer.cpp L961-995 / L1534-1545），故两阶段都开。
+    if (param_.two_stage)
+    {
+        Eigen::VectorXd reg_grad_T = Eigen::VectorXd::Zero(N_);  // ∂c_reg/∂T
+        const double Tbar = T.mean();
+        double reg_cost = 0.0;
+        for (int i = 0; i < N_; i++)
+        {
+            double bound = 0.0, e = 0.0;
+            if (T(i) > param_.time_reg_upper * Tbar)
+            {
+                e = T(i) - param_.time_reg_upper * Tbar;
+                bound = param_.time_reg_upper;
+            }
+            else if (T(i) < param_.time_reg_lower * Tbar)
+            {
+                e = T(i) - param_.time_reg_lower * Tbar;
+                bound = param_.time_reg_lower;
+            }
+            if (e != 0.0)
+            {
+                reg_cost += param_.w_time_reg * e * e;
+                const double diag = 2.0 * param_.w_time_reg * e;
+                reg_grad_T(i) += diag;                    // δᵢⱼ 项
+                reg_grad_T.array() -= diag * bound / N_;  // −boundᵢ/N 项（稠密）
+            }
+        }
+        cost += reg_cost;
+        gdT += reg_grad_T;
+    }
 
     // ---------- 伴随回传 -> (q, T) 梯度 ----------
     Eigen::Matrix2Xd gradQ;
@@ -224,6 +304,9 @@ bool TrajOptimizer::optimize(const Eigen::Matrix<double, 2, 3> &headPVA,
 {
     last_ret_ = 0;
     last_iters_ = 0;
+    last_ret_pre_ = 0;   // [MINCO_V2]
+    last_iters_pre_ = 0; // [MINCO_V2]
+    last_ms_pre_ = 0.0;  // [MINCO_V2]
     timed_out_ = false;
     const auto wall0 = std::chrono::steady_clock::now();
 
@@ -256,29 +339,109 @@ bool TrajOptimizer::optimize(const Eigen::Matrix<double, 2, 3> &headPVA,
         x(2 * Nm + i) = std::log(initT(i));
     }
 
-    // 记录初值代价：若优化后代价显著变差（震荡发散），视为失败让上层回退折线
+    // 记录初值代价：若优化后代价显著变差（震荡发散），视为失败让上层回退折线。
+    // [MINCO_V2] 护栏语义统一：两阶段模式最终 cost 为 FINELY 语义，故初值也用 FINELY 语义估一次；
+    //            单阶段（two_stage=false）沿用第三步语义（PRE 原始梯度、无时间正则）。
+    stage_ = param_.two_stage ? OptStage::FINELY_OPTIMIZATION : OptStage::PRE_OPTIMIZATION;
     Eigen::VectorXd g0;
     const double init_cost = evaluate(x, g0);
 
+    // [MINCO_V2] delta 提为参数 param_.lbfgs_delta（原硬编码 1e-5 过紧；DDR-opt 实配 5e-3）
     lbfgs::lbfgs_parameter_t lbfgs_params;
     lbfgs_params.mem_size = 8;
     lbfgs_params.g_epsilon = 1.0e-5;
     lbfgs_params.past = 3;
-    lbfgs_params.delta = 1.0e-5;
-    lbfgs_params.max_iterations = param_.max_iter;
+    lbfgs_params.delta = param_.lbfgs_delta;
     lbfgs_params.max_linesearch = 32;
 
-    t0_ = std::chrono::steady_clock::now();
+    t0_ = std::chrono::steady_clock::now();  // [MINCO_V2] 两阶段共享同一墙钟（progressCallback 超时取消覆盖全程）
     double minf = 0.0;
-    const int ret = lbfgs::lbfgs_optimize(x, minf,
-                                          &TrajOptimizer::costFuncCallback,
-                                          nullptr,
-                                          &TrajOptimizer::progressCallback,
-                                          this,
-                                          lbfgs_params);
-    last_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0).count();
-    last_cost_ = minf;
-    last_ret_ = ret;
+    int ret = 0;
+
+    if (param_.two_stage)
+    {
+        // [MINCO_V2] ---------- PRE 阶段（含时间正则）：稳定轨迹形状（推出障碍物） ----------
+        lbfgs_params.max_iterations = param_.max_iter_pre;
+        const auto tPre0 = std::chrono::steady_clock::now();
+        stage_ = OptStage::PRE_OPTIMIZATION;
+        ret = lbfgs::lbfgs_optimize(x, minf,
+                                    &TrajOptimizer::costFuncCallback,
+                                    nullptr,
+                                    &TrajOptimizer::progressCallback,
+                                    this,
+                                    lbfgs_params);
+        const auto tPre1 = std::chrono::steady_clock::now();
+        last_ret_pre_ = ret;
+        last_iters_pre_ = last_iters_;  // progressCallback 已写入本阶段最终迭代数
+        last_ms_pre_ = std::chrono::duration<double, std::milli>(tPre1 - tPre0).count();
+        // 阶段间不做护栏：PRE 结果直接喂 FINELY（即使 PRE 返回容忍码也继续，形值已可用）
+        if (std::getenv("MINCO_DBG"))
+        {
+            double s = 0.0, mn = 1e9, mx = 0.0;
+            for (int i = 0; i < N_; i++)
+            {
+                const double t = std::exp(std::min(std::max(x(2 * Nm + i), kTauMin), kTauMax));
+                s += t;
+            }
+            const double mb = s / N_;
+            for (int i = 0; i < N_; i++)
+            {
+                const double t = std::exp(std::min(std::max(x(2 * Nm + i), kTauMin), kTauMax));
+                mn = std::min(mn, t / mb);
+                mx = std::max(mx, t / mb);
+            }
+            std::printf("[DBG PRE ] ret=%d iters=%d T-ratio=[%.3f,%.3f] Tmean=%.3f\n",
+                        ret, last_iters_pre_, mn, mx, mb);
+        }
+
+        // [MINCO_V2] ---------- FINELY 阶段（法向梯度 + 势谷，无时间正则） ----------
+        // 独立调用 ⇒ L-BFGS 有限记忆 / pf 历史全部重置 = 换 cost 地形后的重启（非续跑）
+        lbfgs_params.max_iterations = param_.max_iter_fine;
+        stage_ = OptStage::FINELY_OPTIMIZATION;
+        ret = lbfgs::lbfgs_optimize(x, minf,
+                                    &TrajOptimizer::costFuncCallback,
+                                    nullptr,
+                                    &TrajOptimizer::progressCallback,
+                                    this,
+                                    lbfgs_params);
+        last_iters_ = last_iters_pre_ + last_iters_;  // 全程总迭代（两阶段各自计数之和）
+        last_ret_ = ret;                              // 最终阶段（FINELY）返回码
+        last_cost_ = minf;
+        last_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0).count();
+        if (std::getenv("MINCO_DBG"))
+        {
+            double s = 0.0, mn = 1e9, mx = 0.0;
+            for (int i = 0; i < N_; i++)
+            {
+                const double t = std::exp(std::min(std::max(x(2 * Nm + i), kTauMin), kTauMax));
+                s += t;
+            }
+            const double mb = s / N_;
+            for (int i = 0; i < N_; i++)
+            {
+                const double t = std::exp(std::min(std::max(x(2 * Nm + i), kTauMin), kTauMax));
+                mn = std::min(mn, t / mb);
+                mx = std::max(mx, t / mb);
+            }
+            std::printf("[DBG FINE] ret=%d fine_iters=%d T-ratio=[%.3f,%.3f] Tmean=%.3f cost=%.6f\n",
+                        ret, last_iters_ - last_iters_pre_, mn, mx, mb, minf);
+        }
+    }
+    else
+    {
+        // [MINCO_V2] 单阶段回退开关：two_stage=false ⇒ 无时间正则、ESDF 原始梯度 ⇒ 与第三步完全一致
+        lbfgs_params.max_iterations = param_.max_iter;
+        stage_ = OptStage::PRE_OPTIMIZATION;
+        ret = lbfgs::lbfgs_optimize(x, minf,
+                                    &TrajOptimizer::costFuncCallback,
+                                    nullptr,
+                                    &TrajOptimizer::progressCallback,
+                                    this,
+                                    lbfgs_params);
+        last_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0).count();
+        last_cost_ = minf;
+        last_ret_ = ret;
+    }
 
     // L-BFGS 对线搜索失败会把 x 回退到上一个已接受点，轨迹依然可用（第四步打补丁根治）
     const bool tolerated =

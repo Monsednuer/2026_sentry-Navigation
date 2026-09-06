@@ -116,3 +116,15 @@
     # 速度/加速度软限（与 jps_vmax / MPC MaxLinear 对齐）
     opt_vmax: 1.8
     opt_amax: 1.5
+
+    # ===================== [H.2] 两阶段优化（第四步，报告5.5.4.2） =====================
+    two_stage_opt: true          # 两阶段开关；false 回退第三步单阶段行为
+    opt_max_iter_pre: 1000       # PRE 阶段迭代上限（放大上限让 delta 收敛判定退出，80ms 墙钟兜底）
+    opt_max_iter_fine: 1000      # FINELY 阶段迭代上限（同上）
+    lbfgs_delta: 1.0e-3          # 线搜索提前接受阈值（原硬编码 1e-5 过紧；DDR-opt 实配 5e-3）
+    w_time_reg: 50.0             # 时间正则权重（仅 PRE）
+    time_reg_lower: 0.9          # 段时间/平均段时间 下限
+    time_reg_upper: 1.1          # 段时间/平均段时间 上限
+    fine_grad_threshold: 0.5     # 势谷判定阈值（可移动性探测梯度）
+    fine_probe_step: 0.1         # 可移动性探测步长（m）
+    fine_scale: 0.6              # 势谷 viola 尺度

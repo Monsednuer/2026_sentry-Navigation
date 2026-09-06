@@ -36,6 +36,18 @@ struct TrajOptParam
     double w_acc = 10.0;
     double vmax = 1.8;
     double amax = 1.5;
+
+    // [MINCO_V2] 两阶段优化参数（第四步，报告5.5.4.2；名字与 plan_manager 接线共用，勿改）
+    bool two_stage = true;            // 两阶段开关；false = 第三步单阶段行为（无时间正则）
+    int max_iter_pre = 1000;          // PRE 阶段迭代上限（放大上限让 delta 收敛判定退出，80ms 墙钟兜底——报告5.5.4.1"放大迭代次数上限"）
+    int max_iter_fine = 1000;         // FINELY 阶段迭代上限（同上）
+    double lbfgs_delta = 1.0e-3;      // [V2] 线搜索提前接受阈值（原硬编码 1e-5 过紧；DDR-opt 实配 5e-3）
+    double w_time_reg = 50.0;         // 时间正则权重（仅两阶段模式的 PRE）
+    double time_reg_lower = 0.9;      // 段时间/平均段时间 下限
+    double time_reg_upper = 1.1;      // 段时间/平均段时间 上限
+    double fine_grad_threshold = 0.5; // 势谷判定阈值（可移动性探测梯度）
+    double fine_probe_step = 0.1;     // 可移动性探测步长（m，> ESDF 0.05 分辨率）
+    double fine_scale = 0.6;          // 势谷 viola 尺度（默认 = d_safe 量级）
 };
 
 class TrajOptimizer
@@ -66,7 +78,23 @@ public:
     int lastReturnCode() const { return last_ret_; }
     int lastIterations() const { return last_iters_; }
 
+    // [MINCO_V2] 阶段统计 getter：PRE 阶段（two_stage=false 单阶段运行时不记录，返回 0）
+    int lastRetPre() const { return last_ret_pre_; }
+    int lastItersPre() const { return last_iters_pre_; }
+    double lastMsPre() const { return last_ms_pre_; }
+
+    // [MINCO_V2] 优化阶段枚举（供单测子类切换做 PRE/FINELY 分阶段梯度校验）
+    enum class OptStage
+    {
+        PRE_OPTIMIZATION = 0,
+        FINELY_OPTIMIZATION = 1
+    };
+
 protected:
+    // [MINCO_V2] 当前优化阶段 + protected 切换钩子（供单测子类如 FakeFieldOptimizer 切换做分阶段梯度校验）
+    OptStage stage_ = OptStage::PRE_OPTIMIZATION;
+    void setStage(OptStage s) { stage_ = s; }
+
     // 距离场查询（虚函数，便于单测注入解析距离场校验梯度）
     virtual double queryDist(const Eigen::Vector2d &p) const;
     virtual Eigen::Vector2d queryGrad(const Eigen::Vector2d &p) const;
@@ -88,6 +116,10 @@ private:
     double last_ms_ = 0.0;
     int last_ret_ = 0;
     int last_iters_ = 0;
+    // [MINCO_V2] PRE 阶段统计（两阶段模式记录；单阶段运行保持初值 0）
+    double last_ms_pre_ = 0.0;
+    int last_ret_pre_ = 0;
+    int last_iters_pre_ = 0;
     std::chrono::steady_clock::time_point t0_;
     bool timed_out_ = false;
 };

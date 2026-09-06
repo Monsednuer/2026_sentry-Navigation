@@ -323,6 +323,14 @@ namespace lbfgs
             {
                 return LBFGSERR_INVALID_FUNCVAL;
             }
+            // [MINCO_V2 PATCH] DDR-opt 式线搜索提前接受（报告5.5.4.1）：
+            // 相对本轮线搜索起点的下降量已足够小时直接接受当前试验点，
+            // 根治峡谷势谷处 "Linear Search Max" 假失败。
+            if (param.past > 0 &&
+                std::fabs(finit - f) / (std::fabs(finit) + 1.0) < param.delta / param.past)
+            {
+                return count;  // 正值 = 线搜索成功接受该试验点
+            }
             /* Check the Armijo condition. */
             if (f > finit + stp * dgtest)
             {
