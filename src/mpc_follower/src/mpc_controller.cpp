@@ -621,7 +621,11 @@ void MpcController::updateReachedState()
 
     const auto &goal = reference_path_.back();
     const double distance = std::hypot(current_state_.x - goal.x, current_state_.y - goal.y);
-    reached_flag_ = distance < params_.ReachStopDistance;
+    // 判定圈必须略大于减速坡道的零速点（= ReachStopDistance）：
+    // 坡道让速度在停距处降为 0，机器人恰好停在圈外（闭环实测 0.3005m），
+    // 严格 < 判定会让 reached 永远无法触发，上层 FSM 卡死。
+    constexpr double kReachedEpsilon = 0.05;
+    reached_flag_ = distance < params_.ReachStopDistance + kReachedEpsilon;
     reached_msg.data = reached_flag_;
     reached_pub_->publish(reached_msg);
 }
@@ -724,7 +728,10 @@ void MpcController::controlLoop()
         return;
     }
 
-    if (current_state_.stamp == last_state_stamp)
+    // 比较纳秒数而非 rclcpp::Time：stamp 来自 TF 消息(RCL_ROS_TIME)，
+    // last_state_stamp 默认构造为 RCL_SYSTEM_TIME，直接 == 会抛
+    // "can't compare times with different time sources" 并崩溃。
+    if (current_state_.stamp.nanoseconds() == last_state_stamp.nanoseconds())
     {
         RCLCPP_WARN(get_logger(), "No new tf state data!");
         Control failed_cmd{0.0, 0.0};
