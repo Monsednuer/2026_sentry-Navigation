@@ -31,3 +31,6 @@ src/mpc_follower/src/1.md
 # BEGIN oh-my-opencode-slim clonedeps
 .slim/clonedeps/repos/
 # END oh-my-opencode-slim clonedeps
+
+# 本地搜索工具配置（clonedeps 自动生成，不入库）
+.ignore
