@@ -25,7 +25,8 @@ public:
     navi_planner::DynamicVoronoi voronoi_map;
 
 public:
-    void esdf_init(bool* bin_map_, int sizeX_, int sizeY_, Eigen::Vector2d offset_, bool enable_downstairs = false);
+    // 参数顺序为 (行数, 列数)：Size[0]=sizeY_（行），Size[1]=sizeX_（列），与实现一致
+    void esdf_init(bool* bin_map_, int sizeY_, int sizeX_, Eigen::Vector2d offset_, bool enable_downstairs = false);
     void computeDistanceField();
     void updateDistanceField();
 

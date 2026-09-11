@@ -30,7 +30,8 @@ int main(int argc, char** argv)
 
     ESDF_enviroment::esdf env;
     Eigen::Vector2d offset(0.0, 0.0);
-    env.esdf_init(bin_map, sizeX, sizeY, offset, false);
+    // 注意：esdf_init 第2/3参为 (行数, 列数)，与 esdf_map.cpp 实现一致（Size[0]=行）
+    env.esdf_init(bin_map, sizeY, sizeX, offset, false);
 
     // measure updateDistanceField
     auto t0 = std::chrono::steady_clock::now();
