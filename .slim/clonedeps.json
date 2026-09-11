@@ -1,0 +1,15 @@
+{
+  "version": "1.0.0",
+  "updatedAt": "2026-09-11T17:30:00.000Z",
+  "dependencies": [
+    {
+      "name": "DDR-opt",
+      "resolvedVersion": "b8796b237d00b60da3d5496e15779ff02296e09a",
+      "repoUrl": "https://github.com/ZJU-FAST-Lab/DDR-opt.git",
+      "ref": "HEAD (shallow, 2026-09-11)",
+      "path": ".slim/clonedeps/repos/ZJU-FAST-Lab__DDR-opt",
+      "packagePath": "front_end",
+      "reason": "中科大哨兵2025技术报告 5.5.3 指定参考实现：2D JPS 前端（graph_search.cpp）+ 梯形加减速时间分配 + SDFmap。JPS 修复的语义基准（标准切角 + ESDF 距离场膨胀 isOccWithSafeDis + 起终点收缩）"
+    }
+  ]
+}

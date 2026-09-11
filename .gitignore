@@ -27,3 +27,7 @@ src/vel_forwarder/.vscode/browse.vc.db
 /*.pdf
 docs/
 src/mpc_follower/src/1.md
+
+# BEGIN oh-my-opencode-slim clonedeps
+.slim/clonedeps/repos/
+# END oh-my-opencode-slim clonedeps

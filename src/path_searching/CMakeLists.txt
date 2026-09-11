@@ -84,6 +84,11 @@ add_executable(test_minco src/test_minco.cpp)
 target_link_libraries(test_minco ${PROJECT_NAME}_lib)
 ament_target_dependencies(test_minco Eigen3 OpenCV)
 
+# JPS frontend unit test (第二步验收：随机图/峡谷/切角+膨胀+起终点收缩)
+add_executable(test_jps src/test_jps.cpp)
+target_link_libraries(test_jps ${PROJECT_NAME}_lib)
+ament_target_dependencies(test_jps Eigen3 OpenCV)
+
 # ---------- 包含目录 ----------
 target_include_directories(${PROJECT_NAME}_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -91,7 +96,7 @@ target_include_directories(${PROJECT_NAME}_lib PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 # ---------- 安装 ----------
-install(TARGETS plan_manager esdf_benchmark test_minco ${PROJECT_NAME}_lib
+install(TARGETS plan_manager esdf_benchmark test_minco test_jps ${PROJECT_NAME}_lib
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}

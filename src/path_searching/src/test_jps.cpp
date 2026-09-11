@@ -110,14 +110,16 @@ int main()
         printf("[峡谷-走廊] search=%d 拐点数=%zu\n", through, wps.size());
     }
 
-    // ---------- 场景3：防切角专项 ----------
+    // ---------- 场景3：切角 + ESDF 膨胀专项（对齐 DDR-opt 语义） ----------
     {
-        // 单个对角障碍块，JPS 对角移动不得从两障碍夹角中穿过
+        // 单个障碍格 (49,50)，起终点在其对角两侧：
+        //   无膨胀 → 标准切角 JPS 直接对角穿过（允许擦角，折线近直线）
+        //   膨胀 0.30 → 障碍周边距离 < 半径的区域不可行，路径绕行且保持间距
+        //   起点贴近障碍 → 起终点收缩使搜索仍有解
         const int W = 100, H = 100;
         std::vector<char> mapc(W * H, 0);
         bool* map = reinterpret_cast<bool*>(mapc.data());
-        // 斜线墙：(r,c) 满足 r+c=99 的下半段，只留 r+c=99 上半段绕行
-        for (int r = 50; r < 100; ++r) map[r * W + (99 - r)] = true;
+        map[49 * W + 50] = true;  // 障碍格 (row 49, col 50)
 
         ESDF_enviroment::esdf env;
         env.esdf_init(map, H, W, Eigen::Vector2d(0, 0), false);
@@ -125,10 +127,41 @@ int main()
         jps.setEnvironment(ESDF_enviroment::Ptr(&env, [](ESDF_enviroment::esdf*) {}));
 
         std::vector<Eigen::Vector2d> wps;
-        bool ok = jps.search(Eigen::Vector2d(4.975, 0.475), Eigen::Vector2d(0.475, 4.975), wps);
-        printf("[防切角] search=%d 拐点数=%zu\n", ok, wps.size());
-        if (ok)
-            CHECK(pathCollisionFree(env, wps, 0.1), "防切角:路径不得擦穿障碍角");
+
+        // (a) 无膨胀（默认）：应找到路径且 bin 无碰撞
+        bool ok0 = jps.search(Eigen::Vector2d(2.25, 2.25), Eigen::Vector2d(2.75, 2.75), wps);
+        CHECK(ok0, "无膨胀:切角JPS应有解");
+        if (ok0) CHECK(pathCollisionFree(env, wps, 0.1), "无膨胀:路径无碰撞");
+        printf("[切角-无膨胀] search=%d 拐点数=%zu\n", ok0, wps.size());
+
+        // (b) 膨胀 0.30：路径仍应有解（绕行），且任意采样点 ESDF 距离不低于有效膨胀半径（容差半格）
+        jps.setInflateRadius(0.30);
+        bool ok1 = jps.search(Eigen::Vector2d(2.25, 2.25), Eigen::Vector2d(2.75, 2.75), wps);
+        CHECK(ok1, "膨胀0.30:应仍有解(绕行)");
+        if (ok1)
+        {
+            double min_d = std::numeric_limits<double>::infinity();
+            for (size_t i = 0; i + 1 < wps.size(); ++i)
+            {
+                const double len = (wps[i + 1] - wps[i]).norm();
+                const int steps = std::max(1, (int)std::ceil(len / (0.1 * res)));
+                for (int k = 0; k <= steps; ++k)
+                {
+                    Eigen::Vector2d p = wps[i] + ((double)k / steps) * (wps[i + 1] - wps[i]);
+                    min_d = std::min(min_d, env.getDistBilinear(p));
+                }
+            }
+            // 起终点 ESDF≈0.32m，收缩后有效半径≈0.256；路径最小距离应接近该值（容差 1 格）
+            CHECK(min_d > 0.20, "膨胀0.30:路径最小ESDF距离应保持~0.25m");
+            printf("[切角-膨胀0.30] 拐点数=%zu 路径最小ESDF距离=%.3f m\n", wps.size(), min_d);
+        }
+
+        // (c) 起点收缩：起点 (2.45,2.40)（cell(48,49)，ESDF≈0.07m），配置 0.30 应收缩至 ~0.056 仍有解
+        bool ok2 = jps.search(Eigen::Vector2d(2.45, 2.40), Eigen::Vector2d(2.75, 2.75), wps);
+        CHECK(ok2, "起点贴墙:起终点收缩后应有解");
+        printf("[起点收缩] search=%d 拐点数=%zu\n", ok2, wps.size());
+
+        jps.setInflateRadius(0.0);  // 还原默认，避免影响后续场景
     }
 
     printf(failures == 0 ? "\n全部通过\n" : "\n失败 %d 项\n", failures);

@@ -1503,12 +1503,15 @@ private:
     if (use_replan_fsm_)
     {
       jps_planner_.setEnvironment(esdf_worker_);
+      // [JPS_FIX] ESDF 距离场膨胀：占据判据 = ESDF 距离 < 内切半径+安全余量（DDR-opt jps_safe_dis 同机制）
+      jps_planner_.setInflateRadius(requiredClearanceMeters());
       minco_optimizer_.setEnvironment(esdf_worker_);
     }
     else
     {
       planner_1.setEnvironment(esdf_1);
       jps_planner_.setEnvironment(esdf_1);
+      jps_planner_.setInflateRadius(requiredClearanceMeters());
       minco_optimizer_.setEnvironment(esdf_1);
       const double min_clearance_cells = requiredClearanceMeters() / resolution;
       planner_1.setParam(

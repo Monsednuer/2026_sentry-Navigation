@@ -25,17 +25,22 @@ inline int64_t keyOf(int r, int c) { return (int64_t)r << 32 | (uint32_t)c; }
 bool JPS::occupied(int r, int c) const
 {
     if (!env_) return true;
-    Eigen::Vector2i idx(r, c);
-    return env_->checkCollision(idx);  // 出界即占据（checkCollision 内部已处理）
+    const Eigen::Vector2i idx(r, c);
+    if (env_->checkCollision(idx)) return true;  // 出界或原始栅格占据
+    if (eff_inflate_radius_ <= 0.0) return false;  // 未启用膨胀
+    // ESDF 距离场膨胀（DDR-opt isOccWithSafeDis 同语义）：格距 * 分辨率 < 有效膨胀半径（米）。
+    // 动态障碍并入距离场后膨胀自动生效。checkCollision 已挡出界，getDist 不会命中 inf 分支。
+    return env_->getDist(idx) * ESDF_enviroment::esdf::kResolution < eff_inflate_radius_;
 }
 
 bool JPS::hasForced(int r, int c, int dr, int dc) const
 {
     if (dr != 0 && dc != 0)
     {
-        // 对角：侧向受阻且其前方自由 -> 强制邻居
-        if (occupied(r - dr, c + dc) && !occupied(r - dr, c)) return true;
-        if (occupied(r + dr, c - dc) && !occupied(r, c - dc)) return true;
+        // 对角（标准切角语义，DDR-opt 保守形式）：任一侧向格受阻即强制邻居。
+        // 不查斜前格是否空闲——被占据的强制邻居方向 jump 自然失败，多报无害。
+        if (occupied(r - dr, c)) return true;
+        if (occupied(r, c - dc)) return true;
         return false;
     }
     if (dr != 0)
@@ -56,12 +61,9 @@ bool JPS::jump(int r, int c, int dr, int dc, int gr, int gc, int& jr, int& jc) c
     const int nr = r + dr;
     const int nc = c + dc;
 
+    // 标准切角语义（AAAI 2011 / DDR-opt）：对角移动仅查落点，允许擦障碍角。
+    // 物理安全由 ESDF 距离场膨胀保证（膨胀半径 > 0 时缝隙两侧均不可行）。
     if (occupied(nr, nc)) return false;
-    // 防切角：对角移动要求两个正交方向均自由
-    if (dr != 0 && dc != 0)
-    {
-        if (occupied(nr, c) || occupied(r, nc)) return false;
-    }
 
     if (nr == gr && nc == gc)
     {
@@ -79,7 +81,7 @@ bool JPS::jump(int r, int c, int dr, int dc, int gr, int gc, int& jr, int& jc) c
 
     if (dr != 0 && dc != 0)
     {
-        // 对角方向：先向两个剆链各视一审，录中刖米等注，jump主什了一次
+        // 对角方向：任一正交方向能跳到跳点，则当前点是跳点（标准 JPS 递归规则）
         int tr, tc;
         if (jump(nr, nc, dr, 0, gr, gc, tr, tc) || jump(nr, nc, 0, dc, gr, gc, tr, tc))
         {
@@ -101,6 +103,19 @@ bool JPS::search(const Eigen::Vector2d& start, const Eigen::Vector2d& goal,
 
     const Eigen::Vector2i s = env_->Pos2index(start);   // index: (row, col)
     const Eigen::Vector2i g = env_->Pos2index(goal);
+
+    // 起终点收缩（DDR-opt jps_planner 同机制）：有效膨胀半径不超过起/终点 ESDF 距离的 80%，
+    // 使贴近障碍的起终点不至于落入自身膨胀区而无解；端点原始占据/出界仍直接失败。
+    // 注意：收缩是全局的（整条路径本次搜索都用收缩后的半径），与 DDR-opt 行为一致。
+    eff_inflate_radius_ = inflate_radius_m_;
+    if (eff_inflate_radius_ > 0.0)
+    {
+        if (env_->checkCollision(s) || env_->checkCollision(g)) return false;
+        const double res = ESDF_enviroment::esdf::kResolution;
+        eff_inflate_radius_ = std::min(eff_inflate_radius_, 0.8 * env_->getDist(s) * res);
+        eff_inflate_radius_ = std::min(eff_inflate_radius_, 0.8 * env_->getDist(g) * res);
+        if (eff_inflate_radius_ < 0.0) eff_inflate_radius_ = 0.0;
+    }
     if (occupied(s[0], s[1]) || occupied(g[0], g[1])) return false;
 
     std::priority_queue<OpenEntry, std::vector<OpenEntry>, std::greater<OpenEntry>> open;
@@ -138,11 +153,7 @@ bool JPS::search(const Eigen::Vector2d& start, const Eigen::Vector2d& goal,
         for (const auto& d : DIRS)
         {
             const int dr = d[0], dc = d[1];
-            // 防切角：对角扩展需两正交方向自由
-            if (dr != 0 && dc != 0)
-            {
-                if (occupied(cur.r + dr, cur.c) || occupied(cur.r, cur.c + dc)) continue;
-            }
+            // 标准切角语义：对角扩展不做正交侧格检查（与 jump() 一致）
             int jr, jc;
             if (!jump(cur.r, cur.c, dr, dc, g[0], g[1], jr, jc)) continue;
 

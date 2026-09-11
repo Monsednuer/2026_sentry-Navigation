@@ -1,7 +1,9 @@
 // jps.h
-// 2D Jump Point Search 前端搜索（报告5.5.3，替换 A* 前端）
-// 输入膨胀二值栅格（复用 esdf::bin_map / checkCollision），输出拐点序列（米制坐标）
-// 附带报告5.5.3.2 思路一的时间分配（梯形加减速）与等弧长重采样工具
+// 2D Jump Point Search 前端搜索（报告5.5.3，对齐 DDR-opt graph_search 实现）
+// 标准切角语义（AAAI 2011 原始版，DDR-opt 同）：对角移动仅查落点，允许擦障碍角
+// 占据判据 = ESDF 距离场膨胀：getDist(idx)*res < inflate_radius（米）；0 = 不膨胀（仅原始 bin_map）
+// 起终点落入膨胀区时按端点 ESDF 距离 80% 自动收缩本次搜索的有效半径（DDR-opt jps_planner 机制）
+// 输出拐点序列（米制坐标），附带报告5.5.3.2 思路一的时间分配（梯形加减速）与等弧长重采样工具
 #ifndef JPS_H
 #define JPS_H
 
@@ -9,6 +11,7 @@
 #include <Eigen/Core>
 #include <vector>
 #include <limits>
+#include <algorithm>
 
 namespace navi_planner {
 
@@ -16,6 +19,11 @@ class JPS
 {
 public:
     void setEnvironment(ESDF_enviroment::Ptr env) { env_ = env; }
+
+    // ESDF 距离场膨胀半径（米）：占据判据 = ESDF 格距*res < radius（DDR-opt isOccWithSafeDis 语义，
+    // jps3ms.yaml 默认 0.3）。0（默认）= 不膨胀，仅查原始 bin_map。
+    // 动态障碍并入 voronoi 距离场后膨胀自动生效，无需重建栅格。
+    void setInflateRadius(double radius_m) { inflate_radius_m_ = std::max(0.0, radius_m); }
 
     // start/goal: 米制地图坐标 (x, y)
     // waypoints: 输出拐点序列（含起点终点），米制地图坐标
@@ -29,8 +37,10 @@ public:
 private:
     ESDF_enviroment::Ptr env_;
     int last_expanded_ = 0;
+    double inflate_radius_m_ = 0.0;   // 配置的膨胀半径（米）
+    double eff_inflate_radius_ = 0.0; // 本次搜索的有效膨胀半径（起终点收缩后）
 
-    // true = 占据或出界
+    // true = 占据（原始栅格/出界）或 ESDF 距离小于有效膨胀半径
     bool occupied(int r, int c) const;
 
     // 从 (r,c) 沿 (dr,dc) 跳：命中目标/强制邻居点返回 true 并置 (jr,jc)，否则 false
