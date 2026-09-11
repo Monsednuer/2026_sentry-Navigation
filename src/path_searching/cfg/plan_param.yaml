@@ -88,7 +88,9 @@
     stall_goal_distance_threshold: 0.30
 
     # ===================== [G] JPS 前端（第二步，报告5.5.3 思路一） =====================
-    use_jps_frontend: false     # 灰度开关：true=JPS+时间分配，false=原A*+smoother
+    # 默认启用（2026-09-11 验证链通过：test_jps/test_minco 全过 + 基准图/0312真图/accumulated_ds 避障闭环三地图实测到达）。
+    # 回退方式：置 false 走原 A*+smoother。
+    use_jps_frontend: true
     jps_time_k1: 1.0
     jps_time_k2: 0.3
     jps_vmax: 1.8
@@ -97,8 +99,8 @@
     jps_sample_ds: 0.05
 
     # ===================== [H] MINCO 后端（第三步，报告5.5.3 思路二） =====================
-    # 灰度开关：true=JPS+MINCO轨迹优化（需 use_jps_frontend: true），false=第二步行为
-    use_minco_backend: false
+    # 默认启用（与 use_jps_frontend 配套，验证链同上）。回退方式：置 false 走第二步行为。
+    use_minco_backend: true
     # 控制点平均间距（m），由 JPS 折线弧长按此间距生成中间控制点初值
     opt_ctrl_pt_interval: 0.4
     # cost 采样时间步（s），每段按时长均分采样点数
